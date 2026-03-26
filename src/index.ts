@@ -297,7 +297,16 @@ async function handleGetGKI(
     if (asset) {
       const versionInfo = extractKernelVersion(asset.name);
       const ltsNote = versionInfo?.isLts ? ' (LTS - Latest)' : '';
-      const message = `Here's AnyKernel3 with the <b>${kernelVersion}${ltsNote}</b> kernel:\n\n📥 Download: <a href="${asset.browser_download_url}">Click Here</a>`;
+      const message = `Here's AnyKernel3 with the <b>${kernelVersion}${ltsNote}</b> kernel:
+
+📥 Download: <a href="${asset.browser_download_url}">Click Here</a>
+
+<b>📦 Kernel Info:</b>
+• Root Solution: <a href="https://github.com/SukiSU-Ultra/SukiSU-Ultra">ReSukiSU</a>
+• Includes: SUSFS (Root Hiding)
+• Multi-Manager Support: ✅
+
+💡 <i>ReSukiSU provides frequent updates and better root hiding for banking apps.</i>`;
       await sendMessage(botToken, chatId, message, 'HTML', replyToMessageId, messageThreadId);
     } else {
       const { versions, ltsVersions } = getAvailableVersions(release.assets);
@@ -359,7 +368,13 @@ async function handleGetGKI(
 async function handleStart(botToken: string, chatId: number, replyToMessageId?: number, messageThreadId?: number): Promise<void> {
   const message = `<b>GKI Kernel Download Bot</b>
 
-This bot helps you download GKI kernels with ReSukiSU and SUSFS.
+This bot helps you download GKI kernels with <a href="https://github.com/SukiSU-Ultra/SukiSU-Ultra">ReSukiSU</a> and SUSFS.
+
+<b>📦 About ReSukiSU:</b>
+• Kernel-based root solution for Android
+• Frequent updates & better root hiding
+• SUSFS integration for banking apps
+• Multi-Manager support (KowSU, SukiSU, etc.)
 
 <b>Commands:</b>
 • /get_gki &lt;version&gt; - Get AnyKernel3 for specific kernel version

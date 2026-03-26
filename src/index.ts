@@ -43,6 +43,8 @@ interface TelegramUpdate {
 interface GitHubAsset {
   name: string;
   browser_download_url: string;
+  size?: number;
+  digest?: string;  // Format: "sha256:xxxxx"
 }
 
 interface GitHubRelease {
@@ -257,6 +259,211 @@ async function sendMessage(
   });
 }
 
+// Extract SHA256 hash short from digest string
+function extractShaShort(digest: string | undefined): string {
+  if (!digest) return '';
+  // digest format: "sha256:75e0250c995cbe47fae8558cff3a8da58be52833a87ec93520c582e49121cb6b"
+  const match = digest.match(/sha256:([a-f0-9]+)/i);
+  if (match && match[1]) {
+    return match[1].substring(0, 5).toLowerCase();  // First 5 characters
+  }
+  return '';
+}
+
+// Send document to Telegram chat
+async function sendDocument(
+  botToken: string,
+  chatId: number,
+  fileData: ArrayBuffer,
+  fileName: string,
+  caption: string,
+  replyToMessageId?: number,
+  messageThreadId?: number
+): Promise<boolean> {
+  const url = `https://api.telegram.org/bot${botToken}/sendDocument`;
+
+  const formData = new FormData();
+  formData.append('chat_id', chatId.toString());
+  formData.append('document', new Blob([fileData]), fileName);
+  formData.append('caption', caption);
+  formData.append('parse_mode', 'HTML');
+
+  if (replyToMessageId) {
+    formData.append('reply_to_message_id', replyToMessageId.toString());
+  }
+
+  if (messageThreadId) {
+    formData.append('message_thread_id', messageThreadId.toString());
+  }
+
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      body: formData
+    });
+
+    const result = await response.json() as { ok?: boolean; description?: string };
+    if (!result.ok) {
+      console.error('Telegram sendDocument error:', result.description);
+      return false;
+    }
+    return true;
+  } catch (error) {
+    console.error('Error sending document:', error);
+    return false;
+  }
+}
+
+// Handle /dl command - Download and upload kernel file
+async function handleDownload(
+  botToken: string,
+  chatId: number,
+  kernelVersion: string | null,
+  replyToMessageId?: number,
+  messageThreadId?: number
+): Promise<void> {
+  if (!kernelVersion) {
+    await sendMessage(
+      botToken,
+      chatId,
+      'Please specify a kernel version.\nUsage: <code>/dl &lt;version&gt;</code>\n\nExamples:\n• <code>/dl 6.6.66</code>\n• <code>/dl 5.10.101</code>\n• <code>/dl 6.1</code> (LTS)',
+      'HTML',
+      replyToMessageId,
+      messageThreadId
+    );
+    return;
+  }
+
+  // Send "downloading" status
+  await sendMessage(
+    botToken,
+    chatId,
+    `⏳ <i>Downloading kernel ${kernelVersion}...</i>`,
+    'HTML',
+    replyToMessageId,
+    messageThreadId
+  );
+
+  try {
+    const release = await getLatestRelease();
+
+    if (!release) {
+      await sendMessage(
+        botToken,
+        chatId,
+        '❌ Failed to fetch release information from GitHub. Please try again later.',
+        'HTML',
+        replyToMessageId,
+        messageThreadId
+      );
+      return;
+    }
+
+    const asset = findMatchingAsset(release.assets, kernelVersion);
+
+    if (!asset) {
+      const { versions, ltsVersions } = getAvailableVersions(release.assets);
+      let message = `❌ Kernel version <b>${kernelVersion}</b> not found.\n\n`;
+      
+      if (ltsVersions.length > 0) {
+        message += `<b>🔷 LTS Versions:</b>\n`;
+        message += ltsVersions.map(v => `• <code>${v}</code>`).join('\n');
+        message += '\n\n';
+      }
+      
+      if (versions.length > 0) {
+        message += `<b>📦 Standard GKI:</b> `;
+        message += versions.slice(-10).join(', ');
+        if (versions.length > 10) {
+          message += ` ...and ${versions.length - 10} more`;
+        }
+      }
+      
+      await sendMessage(botToken, chatId, message, 'HTML', replyToMessageId, messageThreadId);
+      return;
+    }
+
+    // Check file size (Telegram limit: 50MB for bots)
+    const maxSize = 50 * 1024 * 1024; // 50MB
+    if (asset.size && asset.size > maxSize) {
+      await sendMessage(
+        botToken,
+        chatId,
+        `❌ File too large (${(asset.size / 1024 / 1024).toFixed(1)}MB). Telegram bot limit is 50MB.\n\nPlease use the direct download link:\n${asset.browser_download_url}`,
+        'HTML',
+        replyToMessageId,
+        messageThreadId
+      );
+      return;
+    }
+
+    // Download the file
+    const downloadResponse = await fetch(asset.browser_download_url);
+    if (!downloadResponse.ok) {
+      await sendMessage(
+        botToken,
+        chatId,
+        '❌ Failed to download file from GitHub. Please try again later.',
+        'HTML',
+        replyToMessageId,
+        messageThreadId
+      );
+      return;
+    }
+
+    const fileData = await downloadResponse.arrayBuffer();
+
+    // Generate new filename: original_name (without .zip) + _SHASHORT.zip
+    const originalName = asset.name.replace(/\.zip$/i, '');
+    const shaShort = extractShaShort(asset.digest);
+    const newFileName = shaShort ? `${originalName}_${shaShort}.zip` : `${originalName}.zip`;
+
+    // Generate caption
+    const versionInfo = extractKernelVersion(asset.name);
+    const ltsNote = versionInfo?.isLts ? ' (LTS)' : '';
+    const sizeMB = (fileData.byteLength / 1024 / 1024).toFixed(1);
+    const caption = `<b>${versionInfo?.version || kernelVersion}${ltsNote}</b> GKI Kernel
+
+📦 Size: ${sizeMB}MB
+🔐 SHA256: ${shaShort || 'N/A'}...
+
+<a href="https://github.com/ReSukiSU/ReSukiSU">ReSukiSU</a> + SUSFS`;
+
+    // Send the file
+    const success = await sendDocument(
+      botToken,
+      chatId,
+      fileData,
+      newFileName,
+      caption,
+      replyToMessageId,
+      messageThreadId
+    );
+
+    if (!success) {
+      await sendMessage(
+        botToken,
+        chatId,
+        '❌ Failed to upload file to Telegram. The file might be too large or an error occurred.\n\nPlease use the direct download link:\n' + asset.browser_download_url,
+        'HTML',
+        replyToMessageId,
+        messageThreadId
+      );
+    }
+
+  } catch (error) {
+    console.error('Error handling /dl:', error);
+    await sendMessage(
+      botToken,
+      chatId,
+      '❌ An error occurred while processing your request. Please try again later.',
+      'HTML',
+      replyToMessageId,
+      messageThreadId
+    );
+  }
+}
+
 // Handle /get_gki command
 async function handleGetGKI(
   botToken: string,
@@ -377,14 +584,15 @@ This bot helps you download GKI kernels with <a href="https://github.com/ReSukiS
 • Multi-Manager support (KowSU, SukiSU, etc.)
 
 <b>Commands:</b>
-• /get_gki &lt;version&gt; - Get AnyKernel3 for specific kernel version
+• /get_gki &lt;version&gt; - Get download link for kernel
+• /dl &lt;version&gt; - Download & send kernel file directly
 • /list - List all available kernel versions
 • /help - Show this help message
 
 <b>Usage Examples:</b>
-• <code>/get_gki 5.10.101</code> - Standard GKI kernel
-• <code>/get_gki 6.1</code> - LTS kernel (6.1.X)
-• <code>/get_gki 6.6.X-lts</code> - LTS kernel (6.6.X)`;
+• <code>/get_gki 6.6.66</code> - Get download link
+• <code>/dl 6.6.66</code> - Send file directly
+• <code>/dl 6.1</code> - LTS kernel (6.1.X)`;
   await sendMessage(botToken, chatId, message, 'HTML', replyToMessageId, messageThreadId);
 }
 
@@ -450,7 +658,8 @@ async function handleList(botToken: string, chatId: number, replyToMessageId?: n
         }
       }
       
-      message += `\n\n💡 Use <code>/get_gki &lt;version&gt;</code> to download.`;
+      message += `\n\n💡 Use <code>/get_gki &lt;version&gt;</code> to get download link.`;
+      message += `\n💡 Use <code>/dl &lt;version&gt;</code> to receive file directly.`;
       message += `\n📌 LTS versions always contain the latest patch level.`;
       
       await sendMessage(
@@ -518,6 +727,9 @@ export default {
             case '/list':
               await handleList(env.BOT_TOKEN, chatId, messageId, threadId);
               break;
+            case '/dl':
+              await handleDownload(env.BOT_TOKEN, chatId, args || null, messageId, threadId);
+              break;
             default:
               // Unknown command, ignore
               break;
@@ -544,6 +756,9 @@ export default {
             case '/list':
               await handleList(env.BOT_TOKEN, chatId, messageId, threadId);
               break;
+            case '/dl':
+              await handleDownload(env.BOT_TOKEN, chatId, args || null, messageId, threadId);
+              break;
             default:
               break;
           }
@@ -565,7 +780,7 @@ export default {
         return new Response(JSON.stringify({
           status: 'ok',
           bot: 'GKI Kernel Download Bot',
-          version: '1.0.0'
+          version: '1.1.0'
         }), {
           headers: { 'Content-Type': 'application/json' }
         });
@@ -594,7 +809,8 @@ export default {
         const commands = [
           { command: 'start', description: 'Start the bot' },
           { command: 'help', description: 'Show help message' },
-          { command: 'get_gki', description: 'Get GKI kernel by version (e.g., 6.1 or 5.10.101)' },
+          { command: 'get_gki', description: 'Get download link for kernel version' },
+          { command: 'dl', description: 'Download & send kernel file directly' },
           { command: 'list', description: 'List available kernel versions' }
         ];
 

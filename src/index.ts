@@ -259,6 +259,80 @@ async function sendMessage(
   });
 }
 
+// Send message and return message_id for later operations (like delete)
+async function sendMessageAndGetId(
+  botToken: string,
+  chatId: number,
+  text: string,
+  parseMode: string = 'Markdown',
+  replyToMessageId?: number,
+  messageThreadId?: number
+): Promise<number | null> {
+  const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
+
+  const body: Record<string, unknown> = {
+    chat_id: chatId,
+    text: text,
+    parse_mode: parseMode,
+    disable_web_page_preview: false
+  };
+
+  if (replyToMessageId) {
+    body.reply_to_message_id = replyToMessageId;
+  }
+
+  if (messageThreadId) {
+    body.message_thread_id = messageThreadId;
+  }
+
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body)
+    });
+
+    const result = await response.json() as { ok?: boolean; result?: { message_id: number } };
+    if (result.ok && result.result) {
+      return result.result.message_id;
+    }
+    return null;
+  } catch (error) {
+    console.error('Error sending message:', error);
+    return null;
+  }
+}
+
+// Delete a message by chat_id and message_id
+async function deleteMessage(
+  botToken: string,
+  chatId: number,
+  messageId: number
+): Promise<boolean> {
+  const url = `https://api.telegram.org/bot${botToken}/deleteMessage`;
+
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        chat_id: chatId,
+        message_id: messageId
+      })
+    });
+
+    const result = await response.json() as { ok?: boolean };
+    return result.ok === true;
+  } catch (error) {
+    console.error('Error deleting message:', error);
+    return false;
+  }
+}
+
 // Extract SHA256 hash short from digest string
 function extractShaShort(digest: string | undefined): string {
   if (!digest) return '';
@@ -334,8 +408,8 @@ async function handleDownload(
     return;
   }
 
-  // Send "downloading" status
-  await sendMessage(
+  // Send "downloading" status message and save its ID for later deletion
+  const statusMessageId = await sendMessageAndGetId(
     botToken,
     chatId,
     `⏳ <i>Downloading kernel ${kernelVersion}...</i>`,
@@ -348,6 +422,7 @@ async function handleDownload(
     const release = await getLatestRelease();
 
     if (!release) {
+      if (statusMessageId) await deleteMessage(botToken, chatId, statusMessageId);
       await sendMessage(
         botToken,
         chatId,
@@ -379,6 +454,7 @@ async function handleDownload(
         }
       }
       
+      if (statusMessageId) await deleteMessage(botToken, chatId, statusMessageId);
       await sendMessage(botToken, chatId, message, 'HTML', replyToMessageId, messageThreadId);
       return;
     }
@@ -386,6 +462,7 @@ async function handleDownload(
     // Check file size (Telegram limit: 50MB for bots)
     const maxSize = 50 * 1024 * 1024; // 50MB
     if (asset.size && asset.size > maxSize) {
+      if (statusMessageId) await deleteMessage(botToken, chatId, statusMessageId);
       await sendMessage(
         botToken,
         chatId,
@@ -400,6 +477,7 @@ async function handleDownload(
     // Download the file
     const downloadResponse = await fetch(asset.browser_download_url);
     if (!downloadResponse.ok) {
+      if (statusMessageId) await deleteMessage(botToken, chatId, statusMessageId);
       await sendMessage(
         botToken,
         chatId,
@@ -440,6 +518,11 @@ async function handleDownload(
       messageThreadId
     );
 
+    // Delete the "downloading" status message after file is sent
+    if (statusMessageId) {
+      await deleteMessage(botToken, chatId, statusMessageId);
+    }
+
     if (!success) {
       await sendMessage(
         botToken,
@@ -453,6 +536,7 @@ async function handleDownload(
 
   } catch (error) {
     console.error('Error handling /dl:', error);
+    if (statusMessageId) await deleteMessage(botToken, chatId, statusMessageId);
     await sendMessage(
       botToken,
       chatId,

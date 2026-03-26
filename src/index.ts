@@ -302,7 +302,7 @@ async function handleGetGKI(
 📥 Download: <a href="${asset.browser_download_url}">Click Here</a>
 
 <b>📦 Kernel Info:</b>
-• Root Solution: <a href="https://github.com/SukiSU-Ultra/SukiSU-Ultra">ReSukiSU</a>
+• Root Solution: <a href="https://github.com/ReSukiSU/ReSukiSU">ReSukiSU</a>
 • Includes: SUSFS (Root Hiding)
 • Multi-Manager Support: ✅
 
@@ -368,7 +368,7 @@ async function handleGetGKI(
 async function handleStart(botToken: string, chatId: number, replyToMessageId?: number, messageThreadId?: number): Promise<void> {
   const message = `<b>GKI Kernel Download Bot</b>
 
-This bot helps you download GKI kernels with <a href="https://github.com/SukiSU-Ultra/SukiSU-Ultra">ReSukiSU</a> and SUSFS.
+This bot helps you download GKI kernels with <a href="https://github.com/ReSukiSU/ReSukiSU">ReSukiSU</a> and SUSFS.
 
 <b>📦 About ReSukiSU:</b>
 • Kernel-based root solution for Android

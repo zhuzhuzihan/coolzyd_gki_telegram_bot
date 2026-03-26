@@ -51,16 +51,51 @@ interface GitHubRelease {
   assets: GitHubAsset[];
 }
 
-// Extract kernel version from filename
-// Example: android12-5.10.101-2022-04-AnyKernel3.zip -> 5.10.101
-function extractKernelVersion(filename: string): string | null {
-  const match = filename.match(/android\d+-(\d+\.\d+\.\d+)-\d+-\d+-AnyKernel3\.zip/);
-  return match ? match[1] : null;
+// Kernel version info interface
+interface KernelVersion {
+  version: string;       // e.g., "5.10.101" or "6.1.X-lts"
+  isLts: boolean;        // true for LTS versions
+  majorMinor: string;    // e.g., "5.10" or "6.1"
 }
 
-// Check if file is AnyKernel3
+// Extract kernel version from filename
+// Supports multiple formats based on actual GitHub release files:
+// - Standard: android12-5.10.101-2022-04-AnyKernel3.zip -> {version: "5.10.101", isLts: false}
+// - LTS: android14-6.1.X-lts-AnyKernel3.zip -> {version: "6.1.X-lts", isLts: true}
+// - LTS: android15-6.6.X-lts-AnyKernel3.zip -> {version: "6.6.X-lts", isLts: true}
+// - LTS: android16-6.12.X-lts-AnyKernel3.zip -> {version: "6.12.X-lts", isLts: true}
+function extractKernelVersion(filename: string): KernelVersion | null {
+  // Pattern for LTS format: androidXX-X.X.X-lts-AnyKernel3.zip
+  // Example: android14-6.1.X-lts-AnyKernel3.zip
+  let match = filename.match(/android\d+-(\d+\.\d+)\.X-lts-AnyKernel3\.zip/i);
+  if (match) {
+    return {
+      version: `${match[1]}.X-lts`,
+      isLts: true,
+      majorMinor: match[1]
+    };
+  }
+
+  // Pattern for standard format with date: androidXX-X.X.X-YYYY-MM-AnyKernel3.zip
+  // Example: android12-5.10.101-2022-04-AnyKernel3.zip
+  match = filename.match(/android\d+-(\d+\.\d+\.\d+)-\d+-\d+-AnyKernel3\.zip/i);
+  if (match) {
+    const version = match[1];
+    const parts = version.split('.');
+    return {
+      version: version,
+      isLts: false,
+      majorMinor: `${parts[0]}.${parts[1]}`
+    };
+  }
+
+  return null;
+}
+
+// Check if file is AnyKernel3 (case-insensitive)
 function isAnyKernel3(filename: string): boolean {
-  return filename.includes('AnyKernel3') && filename.endsWith('.zip');
+  const lowerName = filename.toLowerCase();
+  return lowerName.includes('anykernel3') && lowerName.endsWith('.zip');
 }
 
 // Fetch latest release from GitHub
@@ -82,31 +117,108 @@ async function getLatestRelease(): Promise<GitHubRelease | null> {
   return await response.json() as GitHubRelease;
 }
 
+// Normalize user input version for matching
+// Supports: "6.1", "6.1.X", "6.1.X-lts", "6.1.75", etc.
+function normalizeVersion(input: string): string {
+  let version = input.trim().toLowerCase();
+  
+  // Remove -lts suffix for comparison, we'll add it back if needed
+  const isLtsRequest = version.endsWith('-lts');
+  if (isLtsRequest) {
+    version = version.slice(0, -4);
+  }
+  
+  return version;
+}
+
 // Find matching AnyKernel3 file by kernel version
+// Supports both exact match and LTS matching:
+// - "5.10.101" matches android12-5.10.101-2022-04-AnyKernel3.zip
+// - "6.1", "6.1.X", "6.1.X-lts" all match android14-6.1.X-lts-AnyKernel3.zip
 function findMatchingAsset(assets: GitHubAsset[], kernelVersion: string): GitHubAsset | null {
+  const normalizedInput = normalizeVersion(kernelVersion);
+  const inputIsLtsRequest = kernelVersion.toLowerCase().includes('x') || 
+                            kernelVersion.toLowerCase().endsWith('-lts') ||
+                            kernelVersion.toLowerCase().endsWith('.x');
+
   for (const asset of assets) {
-    if (isAnyKernel3(asset.name)) {
-      const version = extractKernelVersion(asset.name);
-      if (version === kernelVersion) {
-        return asset;
+    if (!isAnyKernel3(asset.name)) continue;
+
+    const versionInfo = extractKernelVersion(asset.name);
+    if (!versionInfo) continue;
+
+    // Exact match
+    if (versionInfo.version.toLowerCase() === normalizedInput) {
+      return asset;
+    }
+
+    // LTS matching: user inputs "6.1", "6.1.X", "6.1.X-lts" -> matches "6.1.X-lts"
+    if (versionInfo.isLts) {
+      // Check if user is looking for this LTS version
+      const inputParts = normalizedInput.replace('-lts', '').split('.');
+      if (inputParts.length >= 2) {
+        const inputMajorMinor = `${inputParts[0]}.${inputParts[1]}`;
+        if (versionInfo.majorMinor === inputMajorMinor) {
+          // User's major.minor matches this LTS version
+          if (inputIsLtsRequest || inputParts.length === 2 || inputParts[2] === 'x') {
+            return asset;
+          }
+        }
       }
     }
   }
+
   return null;
 }
 
 // Get all available kernel versions from AnyKernel3 files
-function getAvailableVersions(assets: GitHubAsset[]): string[] {
+// Groups versions by major.minor and separates LTS versions
+function getAvailableVersions(assets: GitHubAsset[]): { versions: string[], ltsVersions: string[] } {
   const versions: string[] = [];
+  const ltsVersions: string[] = [];
+
   for (const asset of assets) {
     if (isAnyKernel3(asset.name)) {
-      const version = extractKernelVersion(asset.name);
-      if (version) {
-        versions.push(version);
+      const versionInfo = extractKernelVersion(asset.name);
+      if (versionInfo) {
+        if (versionInfo.isLts) {
+          // Add LTS version (avoid duplicates)
+          if (!ltsVersions.includes(versionInfo.version)) {
+            ltsVersions.push(versionInfo.version);
+          }
+        } else {
+          // Add regular version
+          versions.push(versionInfo.version);
+        }
       }
     }
   }
-  return versions;
+
+  // Sort versions
+  versions.sort((a, b) => {
+    const aParts = a.split('.').map(Number);
+    const bParts = b.split('.').map(Number);
+    for (let i = 0; i < 3; i++) {
+      if ((aParts[i] || 0) !== (bParts[i] || 0)) {
+        return (aParts[i] || 0) - (bParts[i] || 0);
+      }
+    }
+    return 0;
+  });
+
+  // Sort LTS versions
+  ltsVersions.sort((a, b) => {
+    const aParts = a.replace('-lts', '').replace('.X', '').split('.').map(Number);
+    const bParts = b.replace('-lts', '').replace('.X', '').split('.').map(Number);
+    for (let i = 0; i < 2; i++) {
+      if ((aParts[i] || 0) !== (bParts[i] || 0)) {
+        return (aParts[i] || 0) - (bParts[i] || 0);
+      }
+    }
+    return 0;
+  });
+
+  return { versions, ltsVersions };
 }
 
 // Send message to Telegram with optional reply and thread support
@@ -157,8 +269,8 @@ async function handleGetGKI(
     await sendMessage(
       botToken,
       chatId,
-      'Please specify a kernel version.\nUsage: `/get_gki <version>`\nExample: `/get_gki 5.10.101`',
-      'Markdown',
+      'Please specify a kernel version.\nUsage: <code>/get_gki &lt;version&gt;</code>\n\nExamples:\n• <code>/get_gki 5.10.101</code> - Standard GKI\n• <code>/get_gki 6.1</code> or <code>/get_gki 6.1.X-lts</code> - LTS kernel',
+      'HTML',
       replyToMessageId,
       messageThreadId
     );
@@ -183,12 +295,14 @@ async function handleGetGKI(
     const asset = findMatchingAsset(release.assets, kernelVersion);
 
     if (asset) {
-      const message = `Here's AnyKernel3 with the <b>${kernelVersion}</b> kernel that fits your needs:\n\nDownload: <a href="${asset.browser_download_url}">Click Here</a>`;
+      const versionInfo = extractKernelVersion(asset.name);
+      const ltsNote = versionInfo?.isLts ? ' (LTS - Latest)' : '';
+      const message = `Here's AnyKernel3 with the <b>${kernelVersion}${ltsNote}</b> kernel:\n\n📥 Download: <a href="${asset.browser_download_url}">Click Here</a>`;
       await sendMessage(botToken, chatId, message, 'HTML', replyToMessageId, messageThreadId);
     } else {
-      const availableVersions = getAvailableVersions(release.assets);
+      const { versions, ltsVersions } = getAvailableVersions(release.assets);
 
-      if (availableVersions.length === 0) {
+      if (versions.length === 0 && ltsVersions.length === 0) {
         await sendMessage(
           botToken,
           chatId,
@@ -198,11 +312,30 @@ async function handleGetGKI(
           messageThreadId
         );
       } else {
-        const versionsList = availableVersions.map(v => `• <code>${v}</code>`).join('\n');
+        let message = `❌ Kernel version <b>${kernelVersion}</b> not found.\n\n`;
+        
+        if (ltsVersions.length > 0) {
+          message += `<b>🔷 LTS Versions (Recommended):</b>\n`;
+          message += ltsVersions.map(v => `• <code>${v}</code>`).join('\n');
+          message += '\n\n';
+        }
+        
+        if (versions.length > 0) {
+          message += `<b>📦 Standard GKI Versions:</b>\n`;
+          // Show first 20 versions to avoid message too long
+          const displayVersions = versions.slice(-20);
+          message += displayVersions.map(v => `• <code>${v}</code>`).join('\n');
+          if (versions.length > 20) {
+            message += `\n  ... and ${versions.length - 20} more`;
+          }
+        }
+        
+        message += `\n\n💡 Use <code>/list</code> to see all versions.`;
+        
         await sendMessage(
           botToken,
           chatId,
-          `❌ Kernel version <b>${kernelVersion}</b> not found.\n\nAvailable versions:\n${versionsList}`,
+          message,
           'HTML',
           replyToMessageId,
           messageThreadId
@@ -224,7 +357,19 @@ async function handleGetGKI(
 
 // Handle /start command
 async function handleStart(botToken: string, chatId: number, replyToMessageId?: number, messageThreadId?: number): Promise<void> {
-  const message = `<b>GKI Kernel Download Bot</b>\n\nThis bot helps you download GKI kernels with ReSukiSU and SUSFS.\n\nCommands:\n• /get_gki &lt;version&gt; - Get AnyKernel3 for specific kernel version\n• /list - List all available kernel versions\n• /help - Show this help message`;
+  const message = `<b>GKI Kernel Download Bot</b>
+
+This bot helps you download GKI kernels with ReSukiSU and SUSFS.
+
+<b>Commands:</b>
+• /get_gki &lt;version&gt; - Get AnyKernel3 for specific kernel version
+• /list - List all available kernel versions
+• /help - Show this help message
+
+<b>Usage Examples:</b>
+• <code>/get_gki 5.10.101</code> - Standard GKI kernel
+• <code>/get_gki 6.1</code> - LTS kernel (6.1.X)
+• <code>/get_gki 6.6.X-lts</code> - LTS kernel (6.6.X)`;
   await sendMessage(botToken, chatId, message, 'HTML', replyToMessageId, messageThreadId);
 }
 
@@ -250,9 +395,9 @@ async function handleList(botToken: string, chatId: number, replyToMessageId?: n
       return;
     }
 
-    const availableVersions = getAvailableVersions(release.assets);
+    const { versions, ltsVersions } = getAvailableVersions(release.assets);
 
-    if (availableVersions.length === 0) {
+    if (versions.length === 0 && ltsVersions.length === 0) {
       await sendMessage(
         botToken,
         chatId,
@@ -262,11 +407,41 @@ async function handleList(botToken: string, chatId: number, replyToMessageId?: n
         messageThreadId
       );
     } else {
-      const versionsList = availableVersions.map(v => `• <code>${v}</code>`).join('\n');
+      let message = `<b>Available Kernel Versions</b>\n`;
+      message += `<b>Release:</b> ${release.tag_name}\n\n`;
+      
+      if (ltsVersions.length > 0) {
+        message += `<b>🔷 LTS Versions (Recommended):</b>\n`;
+        message += ltsVersions.map(v => `• <code>${v}</code>`).join('\n');
+        message += '\n\n';
+      }
+      
+      if (versions.length > 0) {
+        message += `<b>📦 Standard GKI Versions:</b>\n`;
+        // Group by major.minor for better readability
+        const groupedVersions: Record<string, string[]> = {};
+        for (const v of versions) {
+          const parts = v.split('.');
+          const key = `${parts[0]}.${parts[1]}`;
+          if (!groupedVersions[key]) {
+            groupedVersions[key] = [];
+          }
+          groupedVersions[key].push(v);
+        }
+        
+        for (const [key, vals] of Object.entries(groupedVersions)) {
+          message += `\n<code>${key}.x</code>: `;
+          message += vals.map(v => v.split('.')[2]).join(', ');
+        }
+      }
+      
+      message += `\n\n💡 Use <code>/get_gki &lt;version&gt;</code> to download.`;
+      message += `\n📌 LTS versions always contain the latest patch level.`;
+      
       await sendMessage(
         botToken,
         chatId,
-        `<b>Available Kernel Versions:</b>\n\n${versionsList}\n\nUse <code>/get_gki &lt;version&gt;</code> to download.`,
+        message,
         'HTML',
         replyToMessageId,
         messageThreadId
@@ -404,7 +579,7 @@ export default {
         const commands = [
           { command: 'start', description: 'Start the bot' },
           { command: 'help', description: 'Show help message' },
-          { command: 'get_gki', description: 'Get GKI kernel by version' },
+          { command: 'get_gki', description: 'Get GKI kernel by version (e.g., 6.1 or 5.10.101)' },
           { command: 'list', description: 'List available kernel versions' }
         ];
 

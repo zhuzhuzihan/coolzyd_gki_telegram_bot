@@ -60,6 +60,13 @@ interface KernelVersion {
   majorMinor: string;    // e.g., "5.10" or "6.1"
 }
 
+// OnePlus OKI (OnePlus Kernel) device info interface
+interface OKIDeviceInfo {
+  model: string;    // e.g., "ACE-5-RACE"
+  os: string;       // e.g., "OOS16"
+  fullId: string;   // e.g., "ACE-5-RACE_OOS16"
+}
+
 // Extract kernel version from filename
 // Supports multiple formats based on actual GitHub release files:
 // - Standard: android12-5.10.101-2022-04-AnyKernel3.zip -> {version: "5.10.101", isLts: false}
@@ -342,6 +349,105 @@ function extractShaShort(digest: string | undefined): string {
     return match[1].substring(0, 5).toLowerCase();  // First 5 characters
   }
   return '';
+}
+
+// ===== OnePlus OKI (OnePlus Kernel) Functions =====
+
+// Extract device info from OnePlus kernel filename
+// Example: AK3_OP-ACE-5-RACE_OOS16_android14-6.1.134_ReSukiSU_34681_SuSFS_v2.1.0.zip
+// Returns: { model: "ACE-5-RACE", os: "OOS16", fullId: "ACE-5-RACE_OOS16" }
+function extractOKIDeviceInfo(filename: string): OKIDeviceInfo | null {
+  // Pattern: AK3_OP-{MODEL}_{OS}_android{VERSION}_...
+  const match = filename.match(/AK3_OP-([A-Z0-9][A-Z0-9.-]*)_([A-Z0-9]+)_android\d+/i);
+  if (match) {
+    return {
+      model: match[1],
+      os: match[2],
+      fullId: `${match[1]}_${match[2]}`
+    };
+  }
+  return null;
+}
+
+// Fetch latest release from OnePlus OKI GitHub repo
+async function getOKILatestRelease(): Promise<GitHubRelease | null> {
+  const url = 'https://api.github.com/repos/huangdihd/OnePlus_ReSukiSU_SUSFS/releases/latest';
+
+  const response = await fetch(url, {
+    headers: {
+      'Accept': 'application/vnd.github.v3+json',
+      'User-Agent': 'Telegram-GKI-Bot'
+    }
+  });
+
+  if (!response.ok) {
+    console.error(`OKI GitHub API error: ${response.status}`);
+    return null;
+  }
+
+  return await response.json() as GitHubRelease;
+}
+
+// Normalize string for case-insensitive comparison: lowercase and remove dashes/underscores
+function normalizeForComparison(str: string): string {
+  return str.toLowerCase().replace(/[-_\s]+/g, '');
+}
+
+// Find matching OKI asset by model and OS (case-insensitive)
+// Supports flexible model matching: exact or substring (both directions)
+// OS must match exactly (case-insensitive)
+function findMatchingOKIAsset(assets: GitHubAsset[], modelInput: string, osInput: string): GitHubAsset | null {
+  const normalizedModel = normalizeForComparison(modelInput);
+  const normalizedOs = normalizeForComparison(osInput);
+
+  for (const asset of assets) {
+    if (!asset.name.toLowerCase().endsWith('.zip')) continue;
+
+    const info = extractOKIDeviceInfo(asset.name);
+    if (!info) continue;
+
+    const normalizedFileModel = normalizeForComparison(info.model);
+    const normalizedFileOs = normalizeForComparison(info.os);
+
+    // OS must match exactly (case-insensitive, after normalization)
+    if (normalizedFileOs !== normalizedOs) continue;
+
+    // Model matching: exact match or substring match (both directions)
+    if (normalizedFileModel === normalizedModel ||
+        normalizedFileModel.includes(normalizedModel) ||
+        normalizedModel.includes(normalizedFileModel)) {
+      return asset;
+    }
+  }
+
+  return null;
+}
+
+// Get all available device/model combinations from OKI releases
+function getAvailableOKIDevices(assets: GitHubAsset[]): { devices: string[] } {
+  const deviceMap = new Map<string, string[]>();
+
+  for (const asset of assets) {
+    if (!asset.name.toLowerCase().endsWith('.zip')) continue;
+
+    const info = extractOKIDeviceInfo(asset.name);
+    if (!info) continue;
+
+    const osList = deviceMap.get(info.model) || [];
+    if (!osList.includes(info.os)) {
+      osList.push(info.os);
+    }
+    deviceMap.set(info.model, osList);
+  }
+
+  const devices: string[] = [];
+  for (const [model, osList] of deviceMap.entries()) {
+    for (const os of osList) {
+      devices.push(`${model} (${os})`);
+    }
+  }
+
+  return { devices };
 }
 
 // Send document to Telegram chat
@@ -655,6 +761,277 @@ async function handleGetGKI(
   }
 }
 
+// Handle /get_oki command - Get download link for OnePlus kernel
+async function handleGetOKI(
+  botToken: string,
+  chatId: number,
+  args: string | null,
+  replyToMessageId?: number,
+  messageThreadId?: number
+): Promise<void> {
+  if (!args) {
+    await sendMessage(
+      botToken,
+      chatId,
+      'Please specify a device model and OS version.\nUsage: <code>/get_oki &lt;model&gt; &lt;os&gt;</code>\n\nExamples:\n• <code>/get_oki ace-5-race oos16</code>\n• <code>/get_oki ACE-5-RACE OOS16</code>\n\n💡 Model and OS are case-insensitive.',
+      'HTML',
+      replyToMessageId,
+      messageThreadId
+    );
+    return;
+  }
+
+  // Parse arguments: first arg is model, second is OS
+  const parts = args.trim().split(/\s+/);
+  if (parts.length < 2) {
+    await sendMessage(
+      botToken,
+      chatId,
+      '❌ Invalid arguments. Please provide both model and OS.\nUsage: <code>/get_oki &lt;model&gt; &lt;os&gt;</code>\n\nExample: <code>/get_oki ace-5-race oos16</code>',
+      'HTML',
+      replyToMessageId,
+      messageThreadId
+    );
+    return;
+  }
+
+  const modelInput = parts[0];
+  const osInput = parts[1];
+
+  try {
+    const release = await getOKILatestRelease();
+
+    if (!release) {
+      await sendMessage(
+        botToken,
+        chatId,
+        '❌ Failed to fetch release information from GitHub. Please try again later.',
+        'HTML',
+        replyToMessageId,
+        messageThreadId
+      );
+      return;
+    }
+
+    const asset = findMatchingOKIAsset(release.assets, modelInput, osInput);
+
+    if (asset) {
+      const info = extractOKIDeviceInfo(asset.name);
+      const kernelMatch = asset.name.match(/android(\d+)-(\d+\.\d+\.\d+)/i);
+      const androidVer = kernelMatch ? kernelMatch[1] : '?';
+      const kernelVer = kernelMatch ? kernelMatch[2] : '?';
+      const message = `Here's AnyKernel3 for <b>${info?.fullId || args}</b>:
+
+📥 Download: <a href="${asset.browser_download_url}">Click Here</a>
+
+<b>📦 Kernel Info:</b>
+• Device: <code>${info?.model || modelInput}</code>
+• OS: <code>${info?.os || osInput}</code>
+• Android: ${androidVer} | Kernel: ${kernelVer}
+• Root Solution: <a href="https://github.com/ReSukiSU/ReSukiSU">ReSukiSU</a>
+• Includes: SUSFS (Root Hiding)
+
+💡 <i>ReSukiSU provides frequent updates and better root hiding for banking apps.</i>`;
+      await sendMessage(botToken, chatId, message, 'HTML', replyToMessageId, messageThreadId);
+    } else {
+      const { devices } = getAvailableOKIDevices(release.assets);
+
+      if (devices.length === 0) {
+        await sendMessage(
+          botToken,
+          chatId,
+          '❌ No OnePlus kernel files found in the latest release.',
+          'HTML',
+          replyToMessageId,
+          messageThreadId
+        );
+      } else {
+        let message = `❌ Device <b>${modelInput}</b> with OS <b>${osInput}</b> not found.\n\n`;
+        message += `<b>📱 Available Devices:</b>\n`;
+        message += devices.map(d => `• <code>${d}</code>`).join('\n');
+        message += `\n\n💡 Usage: <code>/get_oki &lt;model&gt; &lt;os&gt;</code>`;
+
+        await sendMessage(botToken, chatId, message, 'HTML', replyToMessageId, messageThreadId);
+      }
+    }
+  } catch (error) {
+    console.error('Error handling /get_oki:', error);
+    await sendMessage(
+      botToken,
+      chatId,
+      '❌ An error occurred while processing your request. Please try again later.',
+      'HTML',
+      replyToMessageId,
+      messageThreadId
+    );
+  }
+}
+
+// Handle /oki command - Download and upload OnePlus kernel file
+async function handleDownloadOKI(
+  botToken: string,
+  chatId: number,
+  args: string | null,
+  replyToMessageId?: number,
+  messageThreadId?: number
+): Promise<void> {
+  if (!args) {
+    await sendMessage(
+      botToken,
+      chatId,
+      'Please specify a device model and OS version.\nUsage: <code>/oki &lt;model&gt; &lt;os&gt;</code>\n\nExamples:\n• <code>/oki ace-5-race oos16</code>\n• <code>/oki ACE-5-RACE OOS16</code>\n\n💡 Model and OS are case-insensitive.',
+      'HTML',
+      replyToMessageId,
+      messageThreadId
+    );
+    return;
+  }
+
+  const parts = args.trim().split(/\s+/);
+  if (parts.length < 2) {
+    await sendMessage(
+      botToken,
+      chatId,
+      '❌ Invalid arguments. Please provide both model and OS.\nUsage: <code>/oki &lt;model&gt; &lt;os&gt;</code>\n\nExample: <code>/oki ace-5-race oos16</code>',
+      'HTML',
+      replyToMessageId,
+      messageThreadId
+    );
+    return;
+  }
+
+  const modelInput = parts[0];
+  const osInput = parts[1];
+
+  // Send "downloading" status message
+  const statusMessageId = await sendMessageAndGetId(
+    botToken,
+    chatId,
+    `⏳ <i>Downloading OnePlus kernel for ${modelInput} ${osInput}...</i>`,
+    'HTML',
+    replyToMessageId,
+    messageThreadId
+  );
+
+  try {
+    const release = await getOKILatestRelease();
+
+    if (!release) {
+      if (statusMessageId) await deleteMessage(botToken, chatId, statusMessageId);
+      await sendMessage(
+        botToken,
+        chatId,
+        '❌ Failed to fetch release information from GitHub. Please try again later.',
+        'HTML',
+        replyToMessageId,
+        messageThreadId
+      );
+      return;
+    }
+
+    const asset = findMatchingOKIAsset(release.assets, modelInput, osInput);
+
+    if (!asset) {
+      const { devices } = getAvailableOKIDevices(release.assets);
+      let message = `❌ Device <b>${modelInput}</b> with OS <b>${osInput}</b> not found.\n\n`;
+
+      if (devices.length > 0) {
+        message += `<b>📱 Available Devices:</b>\n`;
+        message += devices.map(d => `• <code>${d}</code>`).join('\n');
+      }
+
+      if (statusMessageId) await deleteMessage(botToken, chatId, statusMessageId);
+      await sendMessage(botToken, chatId, message, 'HTML', replyToMessageId, messageThreadId);
+      return;
+    }
+
+    // Check file size (Telegram limit: 50MB for bots)
+    const maxSize = 50 * 1024 * 1024; // 50MB
+    if (asset.size && asset.size > maxSize) {
+      if (statusMessageId) await deleteMessage(botToken, chatId, statusMessageId);
+      await sendMessage(
+        botToken,
+        chatId,
+        `❌ File too large (${(asset.size / 1024 / 1024).toFixed(1)}MB). Telegram bot limit is 50MB.\n\nPlease use the direct download link:\n${asset.browser_download_url}`,
+        'HTML',
+        replyToMessageId,
+        messageThreadId
+      );
+      return;
+    }
+
+    // Download the file
+    const downloadResponse = await fetch(asset.browser_download_url);
+    if (!downloadResponse.ok) {
+      if (statusMessageId) await deleteMessage(botToken, chatId, statusMessageId);
+      await sendMessage(
+        botToken,
+        chatId,
+        '❌ Failed to download file from GitHub. Please try again later.',
+        'HTML',
+        replyToMessageId,
+        messageThreadId
+      );
+      return;
+    }
+
+    const fileData = await downloadResponse.arrayBuffer();
+
+    // Generate filename with SHA short
+    const originalName = asset.name.replace(/\.zip$/i, '');
+    const shaShort = extractShaShort(asset.digest);
+    const newFileName = shaShort ? `${originalName}_${shaShort}.zip` : `${originalName}.zip`;
+
+    // Generate caption
+    const info = extractOKIDeviceInfo(asset.name);
+    const sizeMB = (fileData.byteLength / 1024 / 1024).toFixed(1);
+    const caption = `<b>${info?.fullId || args}</b> OnePlus Kernel
+
+📦 Size: ${sizeMB}MB
+🔐 SHA256: ${shaShort || 'N/A'}...
+
+<a href="https://github.com/ReSukiSU/ReSukiSU">ReSukiSU</a> + SUSFS`;
+
+    // Send the file
+    const success = await sendDocument(
+      botToken,
+      chatId,
+      fileData,
+      newFileName,
+      caption,
+      replyToMessageId,
+      messageThreadId
+    );
+
+    // Delete the status message after file is sent
+    if (statusMessageId) {
+      await deleteMessage(botToken, chatId, statusMessageId);
+    }
+
+    if (!success) {
+      await sendMessage(
+        botToken,
+        chatId,
+        '❌ Failed to upload file to Telegram. The file might be too large or an error occurred.\n\nPlease use the direct download link:\n' + asset.browser_download_url,
+        'HTML',
+        replyToMessageId,
+        messageThreadId
+      );
+    }
+  } catch (error) {
+    console.error('Error handling /oki:', error);
+    if (statusMessageId) await deleteMessage(botToken, chatId, statusMessageId);
+    await sendMessage(
+      botToken,
+      chatId,
+      '❌ An error occurred while processing your request. Please try again later.',
+      'HTML',
+      replyToMessageId,
+      messageThreadId
+    );
+  }
+}
+
 // Handle /start command
 async function handleStart(botToken: string, chatId: number, replyToMessageId?: number, messageThreadId?: number): Promise<void> {
   const message = `<b>GKI Kernel Download Bot</b>
@@ -667,16 +1044,25 @@ This bot helps you download GKI kernels with <a href="https://github.com/ReSukiS
 • SUSFS integration for banking apps
 • Multi-Manager support (KowSU, SukiSU, etc.)
 
-<b>Commands:</b>
+<b>📦 GKI Kernel Commands:</b>
 • /get_gki &lt;version&gt; - Get download link for kernel
 • /dl &lt;version&gt; - Download & send kernel file directly
 • /list - List all available kernel versions
+
+<b>📱 OnePlus Kernel Commands:</b>
+• /get_oki &lt;model&gt; &lt;os&gt; - Get OnePlus kernel download link
+• /oki &lt;model&gt; &lt;os&gt; - Download & send OnePlus kernel file directly
+
+<b>Other:</b>
 • /help - Show this help message
 
 <b>Usage Examples:</b>
-• <code>/get_gki 6.6.66</code> - Get download link
-• <code>/dl 6.6.66</code> - Send file directly
-• <code>/dl 6.1</code> - LTS kernel (6.1.X)`;
+• <code>/get_gki 6.6.66</code> - Get GKI download link
+• <code>/dl 6.1</code> - Download GKI LTS kernel
+• <code>/get_oki ace-5-race oos16</code> - Get OnePlus download link
+• <code>/oki ACE-5-RACE OOS16</code> - Download OnePlus kernel
+
+💡 All model and OS inputs are <b>case-insensitive</b>.`;
   await sendMessage(botToken, chatId, message, 'HTML', replyToMessageId, messageThreadId);
 }
 
@@ -814,6 +1200,12 @@ export default {
             case '/dl':
               await handleDownload(env.BOT_TOKEN, chatId, args || null, messageId, threadId);
               break;
+            case '/get_oki':
+              await handleGetOKI(env.BOT_TOKEN, chatId, args || null, messageId, threadId);
+              break;
+            case '/oki':
+              await handleDownloadOKI(env.BOT_TOKEN, chatId, args || null, messageId, threadId);
+              break;
             default:
               // Unknown command, ignore
               break;
@@ -842,6 +1234,12 @@ export default {
               break;
             case '/dl':
               await handleDownload(env.BOT_TOKEN, chatId, args || null, messageId, threadId);
+              break;
+            case '/get_oki':
+              await handleGetOKI(env.BOT_TOKEN, chatId, args || null, messageId, threadId);
+              break;
+            case '/oki':
+              await handleDownloadOKI(env.BOT_TOKEN, chatId, args || null, messageId, threadId);
               break;
             default:
               break;
@@ -895,7 +1293,9 @@ export default {
           { command: 'help', description: 'Show help message' },
           { command: 'get_gki', description: 'Get download link for kernel version' },
           { command: 'dl', description: 'Download & send kernel file directly' },
-          { command: 'list', description: 'List available kernel versions' }
+          { command: 'list', description: 'List available kernel versions' },
+          { command: 'get_oki', description: 'Get download link for OnePlus kernel' },
+          { command: 'oki', description: 'Download & send OnePlus kernel file directly' }
         ];
 
         const response = await fetch(telegramUrl, {

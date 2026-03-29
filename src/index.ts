@@ -879,9 +879,9 @@ async function handleGetOKI(
       } else {
         const target = osInput ? `<b>${modelInput}</b> with OS <b>${osInput}</b>` : `<b>${modelInput}</b>`;
         let message = `❌ ${target} not found.\n\n`;
-        message += `<b>📱 Available Devices:</b>\n`;
+        message += `<blockquote expandable>📱 Available Devices:\n`;
         message += devices.map(d => `• <code>${d}</code>`).join('\n');
-        message += `\n\n💡 Usage: <code>/get_oki &lt;model&gt; [os]</code>`;
+        message += `</blockquote>`;
 
         await sendMessage(botToken, chatId, message, 'HTML', replyToMessageId, messageThreadId);
       }
@@ -958,8 +958,9 @@ async function handleDownloadOKI(
       let message = `❌ ${target} not found.\n\n`;
 
       if (devices.length > 0) {
-        message += `<b>📱 Available Devices:</b>\n`;
+        message += `<blockquote expandable>📱 Available Devices:\n`;
         message += devices.map(d => `• <code>${d}</code>`).join('\n');
+        message += `</blockquote>`;
       }
 
       if (statusMessageId) await deleteMessage(botToken, chatId, statusMessageId);

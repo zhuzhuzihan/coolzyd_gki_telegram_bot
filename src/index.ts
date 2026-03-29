@@ -107,23 +107,57 @@ function isAnyKernel3(filename: string): boolean {
   return lowerName.includes('anykernel3') && lowerName.endsWith('.zip');
 }
 
-// Fetch latest release from GitHub
-async function getLatestRelease(): Promise<GitHubRelease | null> {
-  const url = 'https://api.github.com/repos/coolzyd9107/GKI_KernelSU_SUSFS/releases/latest';
+// Fetch latest release from GitHub with retry (handles transient errors / rate limiting)
+async function fetchGitHubRelease(url: string, label: string): Promise<GitHubRelease | null> {
+  const maxRetries = 2;
+  const headers = {
+    'Accept': 'application/vnd.github.v3+json',
+    'User-Agent': 'Telegram-GKI-Bot'
+  };
 
-  const response = await fetch(url, {
-    headers: {
-      'Accept': 'application/vnd.github.v3+json',
-      'User-Agent': 'Telegram-GKI-Bot'
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const response = await fetch(url, { headers });
+
+      if (!response.ok) {
+        const status = response.status;
+        console.error(`${label} GitHub API error: ${status}`);
+        if (status === 403) {
+          // Rate limited — wait and retry
+          if (attempt < maxRetries) {
+            await new Promise(r => setTimeout(r, 2000 * attempt));
+            continue;
+          }
+          return null;
+        }
+        if (status === 404) return null;
+        // Other 5xx / 4xx — retry once
+        if (attempt < maxRetries) {
+          await new Promise(r => setTimeout(r, 1000 * attempt));
+          continue;
+        }
+        return null;
+      }
+
+      return await response.json() as GitHubRelease;
+    } catch (error) {
+      console.error(`${label} fetch error (attempt ${attempt}):`, error);
+      if (attempt < maxRetries) {
+        await new Promise(r => setTimeout(r, 1000 * attempt));
+        continue;
+      }
+      return null;
     }
-  });
-
-  if (!response.ok) {
-    console.error(`GitHub API error: ${response.status}`);
-    return null;
   }
+  return null;
+}
 
-  return await response.json() as GitHubRelease;
+// Fetch latest GKI release from GitHub
+async function getLatestRelease(): Promise<GitHubRelease | null> {
+  return fetchGitHubRelease(
+    'https://api.github.com/repos/coolzyd9107/GKI_KernelSU_SUSFS/releases/latest',
+    'GKI'
+  );
 }
 
 // Normalize user input version for matching
@@ -369,23 +403,12 @@ function extractOKIDeviceInfo(filename: string): OKIDeviceInfo | null {
   return null;
 }
 
-// Fetch latest release from OnePlus OKI GitHub repo
+// Fetch latest OnePlus OKI release from GitHub
 async function getOKILatestRelease(): Promise<GitHubRelease | null> {
-  const url = 'https://api.github.com/repos/huangdihd/OnePlus_ReSukiSU_SUSFS/releases/latest';
-
-  const response = await fetch(url, {
-    headers: {
-      'Accept': 'application/vnd.github.v3+json',
-      'User-Agent': 'Telegram-GKI-Bot'
-    }
-  });
-
-  if (!response.ok) {
-    console.error(`OKI GitHub API error: ${response.status}`);
-    return null;
-  }
-
-  return await response.json() as GitHubRelease;
+  return fetchGitHubRelease(
+    'https://api.github.com/repos/huangdihd/OnePlus_ReSukiSU_SUSFS/releases/latest',
+    'OKI'
+  );
 }
 
 // Normalize string for case-insensitive comparison: lowercase and remove dashes/underscores

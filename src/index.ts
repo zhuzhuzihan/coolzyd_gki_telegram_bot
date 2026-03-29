@@ -416,12 +416,23 @@ function normalizeForComparison(str: string): string {
   return str.toLowerCase().replace(/[-_\s]+/g, '');
 }
 
+// Extract version number from OS string for comparison (e.g., OOS16 -> 16)
+function extractOSVersion(os: string): number {
+  const match = os.match(/(\d+)$/);
+  return match ? parseInt(match[1], 10) : 0;
+}
+
 // Find matching OKI asset by model and OS (case-insensitive)
-// Supports flexible model matching: exact or substring (both directions)
-// OS must match exactly (case-insensitive)
-function findMatchingOKIAsset(assets: GitHubAsset[], modelInput: string, osInput: string): GitHubAsset | null {
+// - If osInput is provided: match exact OS (case-insensitive)
+// - If osInput is null/empty: pick the latest OS version for the matching model
+// Model matching: exact or substring (both directions)
+function findMatchingOKIAsset(assets: GitHubAsset[], modelInput: string, osInput: string | null): GitHubAsset | null {
   const normalizedModel = normalizeForComparison(modelInput);
-  const normalizedOs = normalizeForComparison(osInput);
+  const normalizedOs = osInput ? normalizeForComparison(osInput) : null;
+
+  // Collect all model-matching assets, then pick by OS
+  let bestMatch: GitHubAsset | null = null;
+  let bestOSVersion = -1;
 
   for (const asset of assets) {
     if (!asset.name.toLowerCase().endsWith('.zip')) continue;
@@ -430,20 +441,28 @@ function findMatchingOKIAsset(assets: GitHubAsset[], modelInput: string, osInput
     if (!info) continue;
 
     const normalizedFileModel = normalizeForComparison(info.model);
-    const normalizedFileOs = normalizeForComparison(info.os);
-
-    // OS must match exactly (case-insensitive, after normalization)
-    if (normalizedFileOs !== normalizedOs) continue;
 
     // Model matching: exact match or substring match (both directions)
-    if (normalizedFileModel === normalizedModel ||
+    const modelMatched = normalizedFileModel === normalizedModel ||
         normalizedFileModel.includes(normalizedModel) ||
-        normalizedModel.includes(normalizedFileModel)) {
+        normalizedModel.includes(normalizedFileModel);
+    if (!modelMatched) continue;
+
+    // If OS is specified, must match exactly (case-insensitive)
+    if (normalizedOs !== null) {
+      if (normalizeForComparison(info.os) !== normalizedOs) continue;
       return asset;
+    }
+
+    // No OS specified — pick the one with the highest OS version number
+    const osVer = extractOSVersion(info.os);
+    if (osVer > bestOSVersion) {
+      bestOSVersion = osVer;
+      bestMatch = asset;
     }
   }
 
-  return null;
+  return bestMatch;
 }
 
 // Get all available device/model combinations from OKI releases
@@ -796,7 +815,7 @@ async function handleGetOKI(
     await sendMessage(
       botToken,
       chatId,
-      'Please specify a device model and OS version.\nUsage: <code>/get_oki &lt;model&gt; &lt;os&gt;</code>\n\nExamples:\n• <code>/get_oki ace-5-race oos16</code>\n• <code>/get_oki ACE-5-RACE OOS16</code>\n\n💡 Model and OS are case-insensitive.',
+      'Please specify a device model. OS version is optional (defaults to latest).\nUsage: <code>/get_oki &lt;model&gt; [os]</code>\n\nExamples:\n• <code>/get_oki ace5race</code> — latest OS\n• <code>/get_oki ace-5-race oos16</code> — specific OS\n• <code>/get_oki ACE-6T OOS16</code>\n\n💡 Model and OS are case-insensitive.',
       'HTML',
       replyToMessageId,
       messageThreadId
@@ -804,22 +823,10 @@ async function handleGetOKI(
     return;
   }
 
-  // Parse arguments: first arg is model, second is OS
+  // Parse arguments: first arg is model, second (optional) is OS
   const parts = args.trim().split(/\s+/);
-  if (parts.length < 2) {
-    await sendMessage(
-      botToken,
-      chatId,
-      '❌ Invalid arguments. Please provide both model and OS.\nUsage: <code>/get_oki &lt;model&gt; &lt;os&gt;</code>\n\nExample: <code>/get_oki ace-5-race oos16</code>',
-      'HTML',
-      replyToMessageId,
-      messageThreadId
-    );
-    return;
-  }
-
   const modelInput = parts[0];
-  const osInput = parts[1];
+  const osInput = parts.length >= 2 ? parts[1] : null;
 
   try {
     const release = await getOKILatestRelease();
@@ -843,7 +850,8 @@ async function handleGetOKI(
       const kernelMatch = asset.name.match(/android(\d+)-(\d+\.\d+\.\d+)/i);
       const androidVer = kernelMatch ? kernelMatch[1] : '?';
       const kernelVer = kernelMatch ? kernelMatch[2] : '?';
-      const message = `Here's AnyKernel3 for <b>${info?.fullId || args}</b>:
+      const autoNote = !osInput ? ' (auto-selected latest OS)' : '';
+      const message = `Here's AnyKernel3 for <b>${info?.fullId || args}</b>${autoNote}:
 
 📥 Download: <a href="${asset.browser_download_url}">Click Here</a>
 
@@ -869,10 +877,11 @@ async function handleGetOKI(
           messageThreadId
         );
       } else {
-        let message = `❌ Device <b>${modelInput}</b> with OS <b>${osInput}</b> not found.\n\n`;
+        const target = osInput ? `<b>${modelInput}</b> with OS <b>${osInput}</b>` : `<b>${modelInput}</b>`;
+        let message = `❌ ${target} not found.\n\n`;
         message += `<b>📱 Available Devices:</b>\n`;
         message += devices.map(d => `• <code>${d}</code>`).join('\n');
-        message += `\n\n💡 Usage: <code>/get_oki &lt;model&gt; &lt;os&gt;</code>`;
+        message += `\n\n💡 Usage: <code>/get_oki &lt;model&gt; [os]</code>`;
 
         await sendMessage(botToken, chatId, message, 'HTML', replyToMessageId, messageThreadId);
       }
@@ -902,7 +911,7 @@ async function handleDownloadOKI(
     await sendMessage(
       botToken,
       chatId,
-      'Please specify a device model and OS version.\nUsage: <code>/oki &lt;model&gt; &lt;os&gt;</code>\n\nExamples:\n• <code>/oki ace-5-race oos16</code>\n• <code>/oki ACE-5-RACE OOS16</code>\n\n💡 Model and OS are case-insensitive.',
+      'Please specify a device model. OS version is optional (defaults to latest).\nUsage: <code>/oki &lt;model&gt; [os]</code>\n\nExamples:\n• <code>/oki ace5race</code> — latest OS\n• <code>/oki ace-5-race oos16</code> — specific OS\n• <code>/oki ACE-6T OOS16</code>\n\n💡 Model and OS are case-insensitive.',
       'HTML',
       replyToMessageId,
       messageThreadId
@@ -911,26 +920,15 @@ async function handleDownloadOKI(
   }
 
   const parts = args.trim().split(/\s+/);
-  if (parts.length < 2) {
-    await sendMessage(
-      botToken,
-      chatId,
-      '❌ Invalid arguments. Please provide both model and OS.\nUsage: <code>/oki &lt;model&gt; &lt;os&gt;</code>\n\nExample: <code>/oki ace-5-race oos16</code>',
-      'HTML',
-      replyToMessageId,
-      messageThreadId
-    );
-    return;
-  }
-
   const modelInput = parts[0];
-  const osInput = parts[1];
+  const osInput = parts.length >= 2 ? parts[1] : null;
+  const displayTarget = osInput ? `${modelInput} ${osInput}` : `${modelInput} (latest OS)`;
 
   // Send "downloading" status message
   const statusMessageId = await sendMessageAndGetId(
     botToken,
     chatId,
-    `⏳ <i>Downloading OnePlus kernel for ${modelInput} ${osInput}...</i>`,
+    `⏳ <i>Downloading OnePlus kernel for ${displayTarget}...</i>`,
     'HTML',
     replyToMessageId,
     messageThreadId
@@ -956,7 +954,8 @@ async function handleDownloadOKI(
 
     if (!asset) {
       const { devices } = getAvailableOKIDevices(release.assets);
-      let message = `❌ Device <b>${modelInput}</b> with OS <b>${osInput}</b> not found.\n\n`;
+      const target = osInput ? `<b>${modelInput}</b> with OS <b>${osInput}</b>` : `<b>${modelInput}</b>`;
+      let message = `❌ ${target} not found.\n\n`;
 
       if (devices.length > 0) {
         message += `<b>📱 Available Devices:</b>\n`;
@@ -1073,8 +1072,8 @@ This bot helps you download GKI kernels with <a href="https://github.com/ReSukiS
 • /list - List all available kernel versions
 
 <b>📱 OnePlus Kernel Commands:</b>
-• /get_oki &lt;model&gt; &lt;os&gt; - Get OnePlus kernel download link
-• /oki &lt;model&gt; &lt;os&gt; - Download & send OnePlus kernel file directly
+• /get_oki &lt;model&gt; [os] - Get OnePlus kernel download link
+• /oki &lt;model&gt; [os] - Download & send OnePlus kernel file directly
 
 <b>Other:</b>
 • /help - Show this help message
@@ -1082,10 +1081,10 @@ This bot helps you download GKI kernels with <a href="https://github.com/ReSukiS
 <b>Usage Examples:</b>
 • <code>/get_gki 6.6.66</code> - Get GKI download link
 • <code>/dl 6.1</code> - Download GKI LTS kernel
-• <code>/get_oki ace-5-race oos16</code> - Get OnePlus download link
-• <code>/oki ACE-5-RACE OOS16</code> - Download OnePlus kernel
+• <code>/get_oki ace5race</code> - Get OnePlus (latest OS)
+• <code>/oki ACE-6T OOS16</code> - Download OnePlus (specific OS)
 
-💡 All model and OS inputs are <b>case-insensitive</b>.`;
+💡 All inputs are <b>case-insensitive</b>. OS is optional — defaults to the latest version.`;
   await sendMessage(botToken, chatId, message, 'HTML', replyToMessageId, messageThreadId);
 }
 

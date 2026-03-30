@@ -7,6 +7,22 @@ interface Env {
   BOT_TOKEN: string;
 }
 
+// MSG bridging: maps (chatId, messageId) -> { fromChatId, fromUserId, targetUserId, targetUsername }
+// Stored in a Map (in-memory per Worker instance). For persistence across invocations,
+// we use Telegram's forwardMessage metadata.
+interface PendingMsg {
+  fromChatId: number;
+  fromMessageId: number;
+  targetUserId: number;
+  targetUsername: string;
+}
+
+// Allowed users for /msg command
+const MSG_USERS: Record<string, number> = {
+  'mczihan': 7118282988,
+  'coolzyd9107': 7282448230
+};
+
 interface TelegramUpdate {
   update_id: number;
   message?: {
@@ -26,6 +42,20 @@ interface TelegramUpdate {
     chat: {
       id: number;
       type: string;
+    };
+    text?: string;
+    reply_to_message?: {
+      message_id: number;
+      from?: {
+        id: number;
+        is_bot: boolean;
+        username?: string;
+      };
+      forward_from?: {
+        id: number;
+        first_name: string;
+        username?: string;
+      };
     };
     text?: string;
   };
@@ -1055,6 +1085,214 @@ async function handleDownloadOKI(
   }
 }
 
+// ===== MSG Bridging Functions =====
+
+// Resolve username (with or without @) to user ID
+function resolveUserId(username: string): { id: number; clean: string } | null {
+  const clean = username.replace(/^@/, '').toLowerCase();
+  const id = MSG_USERS[clean];
+  if (id) return { id, clean };
+  return null;
+}
+
+// Build a list of allowed usernames for help text
+function getAllowedUserList(): string {
+  return Object.keys(MSG_USERS).map(u => `@${u}`).join(', ');
+}
+
+// Send /msg command - forward the command message to target user's private chat
+// When target replies, reply_to_message.forward_from will contain the original sender
+async function handleMsg(
+  botToken: string,
+  chatId: number,
+  args: string | null,
+  fromUserId: number,
+  commandMessageId: number,
+  replyToMessageId?: number,
+  messageThreadId?: number
+): Promise<void> {
+  // Only allowed users can use /msg
+  const isAllowed = Object.values(MSG_USERS).includes(fromUserId);
+  if (!isAllowed) {
+    await sendMessage(
+      botToken, chatId,
+      '❌ You are not authorized to use this command.',
+      'HTML', replyToMessageId, messageThreadId
+    );
+    return;
+  }
+
+  if (!args) {
+    await sendMessage(
+      botToken, chatId,
+      `Usage: <code>/msg &lt;username&gt; &lt;message&gt;</code>\n\nAllowed users:\n${getAllowedUserList()}`,
+      'HTML', replyToMessageId, messageThreadId
+    );
+    return;
+  }
+
+  const parts = args.trim().split(/\s+/);
+  if (parts.length < 2) {
+    await sendMessage(
+      botToken, chatId,
+      `❌ Please provide username and message content.\nUsage: <code>/msg &lt;username&gt; &lt;message&gt;</code>`,
+      'HTML', replyToMessageId, messageThreadId
+    );
+    return;
+  }
+
+  const targetUsername = parts[0];
+  const messageContent = parts.slice(1).join(' ');
+
+  const resolved = resolveUserId(targetUsername);
+  if (!resolved) {
+    await sendMessage(
+      botToken, chatId,
+      `❌ Unknown user <code>${targetUsername}</code>.\nAllowed users:\n${getAllowedUserList()}`,
+      'HTML', replyToMessageId, messageThreadId
+    );
+    return;
+  }
+
+  // Don't send to yourself
+  if (resolved.id === fromUserId) {
+    await sendMessage(
+      botToken, chatId,
+      '❌ You cannot send a message to yourself.',
+      'HTML', replyToMessageId, messageThreadId
+    );
+    return;
+  }
+
+  try {
+    // First, edit the /msg command message to replace it with the actual content
+    // (so the forwarded message looks clean)
+    const editTextUrl = `https://api.telegram.org/bot${botToken}/editMessageText`;
+    const editResp = await fetch(editTextUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        message_id: commandMessageId,
+        text: messageContent,
+        parse_mode: 'HTML'
+      })
+    });
+    const editResult = await editResp.json() as { ok?: boolean };
+
+    if (!editResult.ok) {
+      // If edit fails (e.g., message too old), just forward the original
+    }
+
+    // Forward the (now clean) message to target's private chat
+    // forwardMessage preserves reply chain: when target replies, forward_from has sender info
+    const forwardUrl = `https://api.telegram.org/bot${botToken}/forwardMessage`;
+    const fwdResp = await fetch(forwardUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: resolved.id,
+        from_chat_id: chatId,
+        message_id: commandMessageId
+      })
+    });
+    const fwdResult = await fwdResp.json() as { ok?: boolean };
+
+    if (!fwdResult.ok) {
+      await sendMessage(
+        botToken, chatId,
+        `❌ Failed to forward message to @${resolved.clean}. Make sure they have <b>started a conversation</b> with this bot first.`, 
+        'HTML', replyToMessageId, messageThreadId
+      );
+      return;
+    }
+
+    await sendMessage(
+      botToken, chatId,
+      `✅ Message sent to @${resolved.clean}.\n💡 They can reply to the forwarded message and you'll receive it.`,
+      'HTML', replyToMessageId, messageThreadId
+    );
+  } catch (error) {
+    console.error('Error handling /msg:', error);
+    await sendMessage(
+      botToken, chatId,
+      '❌ Failed to send message. Please try again later.',
+      'HTML', replyToMessageId, messageThreadId
+    );
+  }
+}
+
+// Handle reply to a forwarded bridged message in private chat
+// reply_to_message.forward_from contains the original sender
+async function handleBridgedReply(
+  botToken: string,
+  replierUserId: number,
+  replierChatId: number,
+  replyToMessageId: number,
+  replyText: string,
+  originalMessageId: number
+): Promise<boolean> {
+  // Only process replies in private chats
+  // Only allowed users can be part of the bridge
+  const isAllowed = Object.values(MSG_USERS).includes(replierUserId);
+  if (!isAllowed) return false;
+
+  try {
+    // Fetch the replied-to message to get forward_from info
+    const fwdChatUrl = `https://api.telegram.org/bot${botToken}/getChat`;
+    
+    // Get the forwarded message details via forwardMessage
+    // Actually we need to get the message that was replied to
+    // We can use getUpdates... no, that's not available.
+    // We use copyMessage or just check forward_from from the reply structure.
+    // The reply_to_message in the update doesn't include forward_from directly.
+    // 
+    // Alternative: since the /msg command edits the message THEN forwards it,
+    // the forwarded message's forward_from will have the original sender.
+    // But we can't access forward_from from reply_to_message in the update.
+    //
+    // Simplest reliable approach: since only 2 users, find the OTHER user
+    const otherUser = Object.entries(MSG_USERS).find(([_, id]) => id !== replierUserId);
+    if (!otherUser) return false;
+
+    const [otherUsername, otherUserId] = otherUser as [string, number];
+
+    // Forward the reply to the original sender
+    const fwdUrl = `https://api.telegram.org/bot${botToken}/forwardMessage`;
+    const fwdResp = await fetch(fwdUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: otherUserId,
+        from_chat_id: replierChatId,
+        message_id: originalMessageId
+      })
+    });
+
+    const fwdResult = await fwdResp.json() as { ok?: boolean };
+    if (!fwdResult.ok) {
+      // Forward failed, try sending as text instead
+      const replierTag = Object.entries(MSG_USERS).find(([_, id]) => id === replierUserId);
+      const replierName = replierTag ? `@${replierTag[0]}` : 'Unknown';
+      
+      await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: otherUserId,
+          text: `📨 <b>Reply from ${replierName}:</b>\n\n${replyText}`,
+          parse_mode: 'HTML'
+        })
+      });
+    }
+
+    return true;
+  } catch (error) {
+    console.error('Error handling bridged reply:', error);
+    return false;
+  }
+}
+
 // Handle /start command
 async function handleStart(botToken: string, chatId: number, replyToMessageId?: number, messageThreadId?: number): Promise<void> {
   const message = `<b>GKI Kernel Download Bot</b>
@@ -1076,6 +1314,9 @@ This bot helps you download GKI kernels with <a href="https://github.com/ReSukiS
 • /get_oki &lt;model&gt; [os] - Get OnePlus kernel download link
 • /oki &lt;model&gt; [os] - Download & send OnePlus kernel file directly
 
+<b>💬 Message Bridging:</b>
+• /msg &lt;username&gt; &lt;message&gt; - Send message to another user
+
 <b>Other:</b>
 • /help - Show this help message
 
@@ -1084,6 +1325,7 @@ This bot helps you download GKI kernels with <a href="https://github.com/ReSukiS
 • <code>/dl 6.1</code> - Download GKI LTS kernel
 • <code>/get_oki ace5race</code> - Get OnePlus (latest OS)
 • <code>/oki ACE-6T OOS16</code> - Download OnePlus (specific OS)
+• <code>/msg @mczihan hello</code> - Send message to a user
 
 💡 All inputs are <b>case-insensitive</b>. OS is optional — defaults to the latest version.`;
   await sendMessage(botToken, chatId, message, 'HTML', replyToMessageId, messageThreadId);
@@ -1206,6 +1448,22 @@ export default {
           const chatId = update.message.chat.id;
           const messageId = update.message.message_id;
           const threadId = update.message.message_thread_id;
+          const fromUserId = update.message.from?.id || 0;
+
+          // Handle replies to bridged messages (in private chat)
+          if (update.message.reply_to_message && !command.startsWith('/')) {
+            const handled = await handleBridgedReply(
+              env.BOT_TOKEN,
+              fromUserId,
+              chatId,
+              update.message.reply_to_message.message_id,
+              update.message.text,
+              messageId
+            );
+            if (handled) {
+              return new Response('OK', { status: 200 });
+            }
+          }
 
           switch (command) {
             case '/start':
@@ -1228,6 +1486,9 @@ export default {
               break;
             case '/oki':
               await handleDownloadOKI(env.BOT_TOKEN, chatId, args || null, messageId, threadId);
+              break;
+            case '/msg':
+              await handleMsg(env.BOT_TOKEN, chatId, args || null, fromUserId, messageId, messageId, threadId);
               break;
             default:
               // Unknown command, ignore
@@ -1318,7 +1579,8 @@ export default {
           { command: 'dl', description: 'Download & send kernel file directly' },
           { command: 'list', description: 'List available kernel versions' },
           { command: 'get_oki', description: 'Get download link for OnePlus kernel' },
-          { command: 'oki', description: 'Download & send OnePlus kernel file directly' }
+          { command: 'oki', description: 'Download & send OnePlus kernel file directly' },
+          { command: 'msg', description: 'Send message to another user' }
         ];
 
         const response = await fetch(telegramUrl, {

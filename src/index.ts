@@ -1111,17 +1111,6 @@ async function handleMsg(
   replyToMessageId?: number,
   messageThreadId?: number
 ): Promise<void> {
-  // Only allowed users can use /msg
-  const isAllowed = Object.values(MSG_USERS).includes(fromUserId);
-  if (!isAllowed) {
-    await sendMessage(
-      botToken, chatId,
-      '❌ You are not authorized to use this command.',
-      'HTML', replyToMessageId, messageThreadId
-    );
-    return;
-  }
-
   if (!args) {
     await sendMessage(
       botToken, chatId,

@@ -19,7 +19,7 @@ interface PendingMsg {
 
 // Allowed users for /msg command
 const MSG_USERS: Record<string, number> = {
-  'mczihan': 7118282988,
+  'mc_zihan': 7118282988,
   'coolzyd9107': 7282448230
 };
 

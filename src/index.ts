@@ -455,14 +455,18 @@ function extractOSVersion(os: string): number {
 // Find matching OKI asset by model and OS (case-insensitive)
 // - If osInput is provided: match exact OS (case-insensitive)
 // - If osInput is null/empty: pick the latest OS version for the matching model
-// Model matching: exact or substring (both directions)
+// Model matching: exact match takes priority, substring match as fallback
 function findMatchingOKIAsset(assets: GitHubAsset[], modelInput: string, osInput: string | null): GitHubAsset | null {
   const normalizedModel = normalizeForComparison(modelInput);
   const normalizedOs = osInput ? normalizeForComparison(osInput) : null;
 
-  // Collect all model-matching assets, then pick by OS
-  let bestMatch: GitHubAsset | null = null;
-  let bestOSVersion = -1;
+  // Phase 1: Try exact model match first
+  let exactBestMatch: GitHubAsset | null = null;
+  let exactBestOSVersion = -1;
+
+  // Phase 2: Substring match fallback
+  let substringBestMatch: GitHubAsset | null = null;
+  let substringBestOSVersion = -1;
 
   for (const asset of assets) {
     if (!asset.name.toLowerCase().endsWith('.zip')) continue;
@@ -472,27 +476,37 @@ function findMatchingOKIAsset(assets: GitHubAsset[], modelInput: string, osInput
 
     const normalizedFileModel = normalizeForComparison(info.model);
 
-    // Model matching: exact match or substring match (both directions)
-    const modelMatched = normalizedFileModel === normalizedModel ||
+    const isExactMatch = normalizedFileModel === normalizedModel;
+    const isSubstringMatch = !isExactMatch && (
         normalizedFileModel.includes(normalizedModel) ||
-        normalizedModel.includes(normalizedFileModel);
-    if (!modelMatched) continue;
+        normalizedModel.includes(normalizedFileModel)
+    );
 
     // If OS is specified, must match exactly (case-insensitive)
-    if (normalizedOs !== null) {
-      if (normalizeForComparison(info.os) !== normalizedOs) continue;
-      return asset;
-    }
+    const osMatched = normalizedOs === null || normalizeForComparison(info.os) === normalizedOs;
 
-    // No OS specified — pick the one with the highest OS version number
-    const osVer = extractOSVersion(info.os);
-    if (osVer > bestOSVersion) {
-      bestOSVersion = osVer;
-      bestMatch = asset;
+    if (isExactMatch && osMatched) {
+      if (normalizedOs !== null) return asset; // exact model + exact OS → return immediately
+      const osVer = extractOSVersion(info.os);
+      if (osVer > exactBestOSVersion) {
+        exactBestOSVersion = osVer;
+        exactBestMatch = asset;
+      }
+    } else if (isSubstringMatch && osMatched && !exactBestMatch) {
+      // Only consider substring if no exact match found yet
+      if (normalizedOs !== null) { substringBestMatch = asset; }
+      else {
+        const osVer = extractOSVersion(info.os);
+        if (osVer > substringBestOSVersion) {
+          substringBestOSVersion = osVer;
+          substringBestMatch = asset;
+        }
+      }
     }
   }
 
-  return bestMatch;
+  // Prefer exact match; fall back to substring match
+  return exactBestMatch || substringBestMatch;
 }
 
 // Get all available device/model combinations from OKI releases

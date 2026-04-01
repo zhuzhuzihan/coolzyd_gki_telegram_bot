@@ -137,53 +137,65 @@ function isAnyKernel3(filename: string): boolean {
   return lowerName.includes('anykernel3') && lowerName.endsWith('.zip');
 }
 
+interface GitHubFetchResult {
+  release: GitHubRelease | null;
+  error: string | null;  // human-readable error detail
+}
+
 // Fetch latest release from GitHub with retry (handles transient errors / rate limiting)
-async function fetchGitHubRelease(url: string, label: string): Promise<GitHubRelease | null> {
+async function fetchGitHubRelease(url: string, label: string): Promise<GitHubFetchResult> {
   const maxRetries = 2;
   const headers = {
     'Accept': 'application/vnd.github.v3+json',
     'User-Agent': 'Telegram-GKI-Bot'
   };
 
+  let lastStatus = 0;
+  let lastError = '';
+
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       const response = await fetch(url, { headers });
 
       if (!response.ok) {
-        const status = response.status;
-        console.error(`${label} GitHub API error: ${status}`);
-        if (status === 403) {
+        lastStatus = response.status;
+        console.error(`${label} GitHub API error: ${lastStatus}`);
+        if (lastStatus === 403) {
           // Rate limited — wait and retry
           if (attempt < maxRetries) {
             await new Promise(r => setTimeout(r, 2000 * attempt));
             continue;
           }
-          return null;
+          return { release: null, error: `GitHub API rate limited (HTTP 403). Please try again later.` };
         }
-        if (status === 404) return null;
+        if (lastStatus === 404) {
+          return { release: null, error: `Repository or release not found (HTTP 404).` };
+        }
+        lastError = `HTTP ${status}`;
         // Other 5xx / 4xx — retry once
         if (attempt < maxRetries) {
           await new Promise(r => setTimeout(r, 1000 * attempt));
           continue;
         }
-        return null;
+        return { release: null, error: `GitHub API returned ${lastError}.` };
       }
 
-      return await response.json() as GitHubRelease;
+      return { release: await response.json() as GitHubRelease, error: null };
     } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
       console.error(`${label} fetch error (attempt ${attempt}):`, error);
       if (attempt < maxRetries) {
         await new Promise(r => setTimeout(r, 1000 * attempt));
         continue;
       }
-      return null;
+      return { release: null, error: `Network error: ${lastError}` };
     }
   }
-  return null;
+  return { release: null, error: lastError || 'Unknown error after retries.' };
 }
 
 // Fetch latest GKI release from GitHub
-async function getLatestRelease(): Promise<GitHubRelease | null> {
+async function getLatestRelease(): Promise<GitHubFetchResult> {
   return fetchGitHubRelease(
     'https://api.github.com/repos/coolzyd9107/GKI_KernelSU_SUSFS/releases/latest',
     'GKI'
@@ -434,7 +446,7 @@ function extractOKIDeviceInfo(filename: string): OKIDeviceInfo | null {
 }
 
 // Fetch latest OnePlus OKI release from GitHub
-async function getOKILatestRelease(): Promise<GitHubRelease | null> {
+async function getOKILatestRelease(): Promise<GitHubFetchResult> {
   return fetchGitHubRelease(
     'https://api.github.com/repos/huangdihd/OnePlus_ReSukiSU_SUSFS/releases/latest',
     'OKI'
@@ -1122,9 +1134,15 @@ async function handleMsg(
   args: string | null,
   fromUserId: number,
   commandMessageId: number,
+  chatType: string,
   replyToMessageId?: number,
   messageThreadId?: number
 ): Promise<void> {
+  // Only allow /msg in private chats
+  if (chatType !== 'private') {
+    return;
+  }
+
   if (!args) {
     await sendMessage(
       botToken, chatId,
@@ -1449,6 +1467,7 @@ export default {
         if (update.message && update.message.text) {
           const { command, args } = parseCommand(update.message.text);
           const chatId = update.message.chat.id;
+          const chatType = update.message.chat.type;
           const messageId = update.message.message_id;
           const threadId = update.message.message_thread_id;
           const fromUserId = update.message.from?.id || 0;
@@ -1491,7 +1510,7 @@ export default {
               await handleDownloadOKI(env.BOT_TOKEN, chatId, args || null, messageId, threadId);
               break;
             case '/msg':
-              await handleMsg(env.BOT_TOKEN, chatId, args || null, fromUserId, messageId, messageId, threadId);
+              await handleMsg(env.BOT_TOKEN, chatId, args || null, fromUserId, messageId, chatType, messageId, threadId);
               break;
             default:
               // Unknown command, ignore

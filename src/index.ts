@@ -171,7 +171,7 @@ async function fetchGitHubRelease(url: string, label: string): Promise<GitHubFet
         if (lastStatus === 404) {
           return { release: null, error: `Repository or release not found (HTTP 404).` };
         }
-        lastError = `HTTP ${status}`;
+        lastError = `HTTP ${lastStatus}`;
         // Other 5xx / 4xx — retry once
         if (attempt < maxRetries) {
           await new Promise(r => setTimeout(r, 1000 * attempt));
@@ -623,14 +623,14 @@ async function handleDownload(
   );
 
   try {
-    const release = await getLatestRelease();
+    const { release, error: fetchError } = await getLatestRelease();
 
     if (!release) {
       if (statusMessageId) await deleteMessage(botToken, chatId, statusMessageId);
       await sendMessage(
         botToken,
         chatId,
-        '❌ Failed to fetch release information from GitHub. Please try again later.',
+        `❌ Failed to fetch release information from GitHub.\n📋 ${fetchError || 'Unknown error'}`,
         'HTML',
         replyToMessageId,
         messageThreadId
@@ -773,13 +773,13 @@ async function handleGetGKI(
   }
 
   try {
-    const release = await getLatestRelease();
+    const { release, error: fetchError } = await getLatestRelease();
 
     if (!release) {
       await sendMessage(
         botToken,
         chatId,
-        '❌ Failed to fetch release information from GitHub. Please try again later.',
+        `❌ Failed to fetch release information from GitHub.\n📋 ${fetchError || 'Unknown error'}`,
         'HTML',
         replyToMessageId,
         messageThreadId
@@ -885,13 +885,13 @@ async function handleGetOKI(
   const osInput = parts.length >= 2 ? parts[1] : null;
 
   try {
-    const release = await getOKILatestRelease();
+    const { release, error: fetchError } = await getOKILatestRelease();
 
     if (!release) {
       await sendMessage(
         botToken,
         chatId,
-        '❌ Failed to fetch release information from GitHub. Please try again later.',
+        `❌ Failed to fetch release information from GitHub.\n📋 ${fetchError || 'Unknown error'}`,
         'HTML',
         replyToMessageId,
         messageThreadId
@@ -991,14 +991,14 @@ async function handleDownloadOKI(
   );
 
   try {
-    const release = await getOKILatestRelease();
+    const { release, error: fetchError } = await getOKILatestRelease();
 
     if (!release) {
       if (statusMessageId) await deleteMessage(botToken, chatId, statusMessageId);
       await sendMessage(
         botToken,
         chatId,
-        '❌ Failed to fetch release information from GitHub. Please try again later.',
+        `❌ Failed to fetch release information from GitHub.\n📋 ${fetchError || 'Unknown error'}`,
         'HTML',
         replyToMessageId,
         messageThreadId
@@ -1360,13 +1360,13 @@ async function handleHelp(botToken: string, chatId: number, replyToMessageId?: n
 // Handle /list command
 async function handleList(botToken: string, chatId: number, replyToMessageId?: number, messageThreadId?: number): Promise<void> {
   try {
-    const release = await getLatestRelease();
+    const { release, error: fetchError } = await getLatestRelease();
 
     if (!release) {
       await sendMessage(
         botToken,
         chatId,
-        '❌ Failed to fetch release information from GitHub. Please try again later.',
+        `❌ Failed to fetch release information from GitHub.\n📋 ${fetchError || 'Unknown error'}`,
         'HTML',
         replyToMessageId,
         messageThreadId

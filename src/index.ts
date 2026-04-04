@@ -1472,8 +1472,8 @@ export default {
           const threadId = update.message.message_thread_id;
           const fromUserId = update.message.from?.id || 0;
 
-          // Handle replies to bridged messages (in private chat)
-          if (update.message.reply_to_message && !command.startsWith('/')) {
+          // Handle replies to bridged messages (private chat only)
+          if (chatType === 'private' && update.message.reply_to_message && !command.startsWith('/')) {
             const handled = await handleBridgedReply(
               env.BOT_TOKEN,
               fromUserId,

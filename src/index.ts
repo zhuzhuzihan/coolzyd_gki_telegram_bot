@@ -18,11 +18,21 @@ interface PendingMsg {
   targetUsername: string;
 }
 
-// Allowed users for /msg command
-const MSG_USERS: Record<string, number> = {
+// Super admins (hardcoded, cannot be removed)
+const SUPER_ADMINS: Record<string, number> = {
   'mc_zihan': 7118282988,
   'coolzyd9107': 7282448230
 };
+
+// Keep MSG_USERS as alias for backward compatibility
+const MSG_USERS = SUPER_ADMINS;
+
+interface AdminEntry {
+  userId: number;
+  username: string;
+  addedAt: string;
+  addedBy: number;
+}
 
 interface TelegramUpdate {
   update_id: number;
@@ -610,6 +620,46 @@ async function removeGroupFromWhitelist(kv: KVNamespace, chatId: number): Promis
   return true;
 }
 
+// Admin management functions
+async function isAdmin(kv: KVNamespace, userId: number): Promise<boolean> {
+  if (Object.values(SUPER_ADMINS).includes(userId)) return true;
+  const entry = await kv.get(`admin:${userId}`);
+  return entry !== null;
+}
+
+function isSuperAdmin(userId: number): boolean {
+  return Object.values(SUPER_ADMINS).includes(userId);
+}
+
+async function addAdminToKV(kv: KVNamespace, userId: number, username: string, addedBy: number): Promise<boolean> {
+  if (Object.values(SUPER_ADMINS).includes(userId)) return false;
+  const entry: AdminEntry = { userId, username: username || 'unknown', addedAt: new Date().toISOString(), addedBy };
+  await kv.put(`admin:${userId}`, JSON.stringify(entry));
+  return true;
+}
+
+async function removeAdminFromKV(kv: KVNamespace, userId: number): Promise<boolean> {
+  if (Object.values(SUPER_ADMINS).includes(userId)) return false;
+  const existed = await kv.get(`admin:${userId}`);
+  if (!existed) return false;
+  await kv.delete(`admin:${userId}`);
+  return true;
+}
+
+async function listAllAdmins(kv: KVNamespace): Promise<{ superAdmins: Array<{ name: string; id: number }>; kvAdmins: AdminEntry[] }> {
+  const superAdmins = Object.entries(SUPER_ADMINS).map(([name, id]) => ({ name, id }));
+  const list = await kv.list({ prefix: 'admin:' });
+  const kvAdmins: AdminEntry[] = [];
+  for (const key of list.keys) {
+    const value = await kv.get(key.name);
+    if (value) {
+      try { kvAdmins.push(JSON.parse(value) as AdminEntry); } catch { /* skip */ }
+    }
+  }
+  kvAdmins.sort((a, b) => a.userId - b.userId);
+  return { superAdmins, kvAdmins };
+}
+
 // List all whitelisted groups
 async function listWhitelistedGroups(kv: KVNamespace): Promise<WhitelistEntry[]> {
   const list = await kv.list({ prefix: 'whitelist:' });
@@ -713,9 +763,10 @@ async function handleAdmin(
   replyToMessageId?: number,
   messageThreadId?: number
 ): Promise<void> {
-  // Only allow fixed admins
-  const isAdmin = Object.values(MSG_USERS).includes(fromUserId);
-  if (!isAdmin) {
+  // Check admin permission
+  const isSuper = isSuperAdmin(fromUserId);
+  const isKVAdmin = kv ? await isAdmin(kv, fromUserId) : false;
+  if (!isSuper && !isKVAdmin) {
     await sendMessage(
       botToken, chatId,
       '❌ 仅管理员可使用此命令。',
@@ -738,10 +789,15 @@ async function handleAdmin(
     await sendMessage(
       botToken, chatId,
       '<b>📋 /admin 管理命令</b>\n\n' +
+      '🔒 群组管理:\n' +
       '• <code>/admin list</code> — 查看白名单群组\n' +
       '• <code>/admin add &lt;chatId&gt; [群名]</code> — 添加群组到白名单\n' +
       '• <code>/admin remove &lt;chatId&gt;</code> — 从白名单移除群组\n' +
       '• <code>/admin leaveall confirm</code> — 一键退出所有白名单群组并清空白名单\n\n' +
+      '👤 管理员管理:\n' +
+      '• <code>/admin admins</code> — 查看所有管理员\n' +
+      '• <code>/admin addadmin &lt;userId&gt; [用户名]</code> — 添加管理员\n' +
+      '• <code>/admin removeadmin &lt;userId&gt;</code> — 移除管理员\n\n' +
       '💡 Chat ID 通常为负数，例如 <code>-1001234567890</code>',
       'HTML', replyToMessageId, messageThreadId
     );
@@ -857,10 +913,94 @@ async function handleAdmin(
       await sendMessage(botToken, chatId, report, 'HTML', replyToMessageId, messageThreadId);
       break;
     }
+    case 'admins': {
+      if (!kv) {
+        await sendMessage(botToken, chatId, '❌ KV 未配置。', 'HTML', replyToMessageId, messageThreadId);
+        break;
+      }
+      const allAdmins = await listAllAdmins(kv);
+      let msg = '<b>👤 管理员列表</b>\n\n<b>👑 超级管理员（不可移除）</b>\n';
+      allAdmins.superAdmins.forEach((a, i) => {
+        msg += `${i + 1}. ${a.name} — <code>${a.id}</code>\n`;
+      });
+      if (allAdmins.kvAdmins.length > 0) {
+        msg += `\n<b>🔧 普通管理员 (${allAdmins.kvAdmins.length})</b>\n`;
+        allAdmins.kvAdmins.forEach((a, i) => {
+          msg += `${i + 1}. ${a.username} — <code>${a.userId}</code>\n`;
+          msg += `   添加者: ${a.addedBy} | 添加时间: ${a.addedAt}\n`;
+        });
+      } else {
+        msg += '\n暂无其他管理员。';
+      }
+      await sendMessage(botToken, chatId, msg, 'HTML', replyToMessageId, messageThreadId);
+      break;
+    }
+    case 'addadmin': {
+      if (!isSuper) {
+        await sendMessage(botToken, chatId, '❌ 仅超级管理员可添加其他管理员。', 'HTML', replyToMessageId, messageThreadId);
+        break;
+      }
+      if (!kv) {
+        await sendMessage(botToken, chatId, '❌ KV 未配置。', 'HTML', replyToMessageId, messageThreadId);
+        break;
+      }
+      if (parts.length < 2) {
+        await sendMessage(botToken, chatId, '❌ 请提供用户 ID。\nUsage: <code>/admin addadmin &lt;userId&gt; [用户名]</code>', 'HTML', replyToMessageId, messageThreadId);
+        break;
+      }
+      const targetUserId = parseInt(parts[1], 10);
+      if (isNaN(targetUserId)) {
+        await sendMessage(botToken, chatId, '❌ 无效的用户 ID。', 'HTML', replyToMessageId, messageThreadId);
+        break;
+      }
+      if (Object.values(SUPER_ADMINS).includes(targetUserId)) {
+        await sendMessage(botToken, chatId, '❌ 该用户已是超级管理员，无需重复添加。', 'HTML', replyToMessageId, messageThreadId);
+        break;
+      }
+      const already = await isAdmin(kv, targetUserId);
+      if (already) {
+        await sendMessage(botToken, chatId, '❌ 该用户已是管理员。', 'HTML', replyToMessageId, messageThreadId);
+        break;
+      }
+      const username = parts.slice(2).join(' ') || 'unknown';
+      await addAdminToKV(kv, targetUserId, username, fromUserId);
+      await sendMessage(botToken, chatId, `✅ 已添加管理员:\n• 用户 ID: <code>${targetUserId}</code>\n• 用户名: ${username}`, 'HTML', replyToMessageId, messageThreadId);
+      break;
+    }
+    case 'removeadmin': {
+      if (!isSuper) {
+        await sendMessage(botToken, chatId, '❌ 仅超级管理员可移除其他管理员。', 'HTML', replyToMessageId, messageThreadId);
+        break;
+      }
+      if (!kv) {
+        await sendMessage(botToken, chatId, '❌ KV 未配置。', 'HTML', replyToMessageId, messageThreadId);
+        break;
+      }
+      if (parts.length < 2) {
+        await sendMessage(botToken, chatId, '❌ 请提供用户 ID。\nUsage: <code>/admin removeadmin &lt;userId&gt;</code>', 'HTML', replyToMessageId, messageThreadId);
+        break;
+      }
+      const targetUserId = parseInt(parts[1], 10);
+      if (isNaN(targetUserId)) {
+        await sendMessage(botToken, chatId, '❌ 无效的用户 ID。', 'HTML', replyToMessageId, messageThreadId);
+        break;
+      }
+      if (Object.values(SUPER_ADMINS).includes(targetUserId)) {
+        await sendMessage(botToken, chatId, '❌ 超级管理员不可移除。', 'HTML', replyToMessageId, messageThreadId);
+        break;
+      }
+      const removed = await removeAdminFromKV(kv, targetUserId);
+      if (removed) {
+        await sendMessage(botToken, chatId, `✅ 已移除管理员 <code>${targetUserId}</code>。`, 'HTML', replyToMessageId, messageThreadId);
+      } else {
+        await sendMessage(botToken, chatId, `❌ 该用户不在管理员列表中。`, 'HTML', replyToMessageId, messageThreadId);
+      }
+      break;
+    }
     default:
       await sendMessage(
         botToken, chatId,
-        '❌ 未知子命令。可用命令:\n• <code>/admin list</code>\n• <code>/admin add &lt;chatId&gt; [群名]</code>\n• <code>/admin remove &lt;chatId&gt;</code>\n• <code>/admin leaveall [confirm]</code>',
+        '❌ 未知子命令。可用命令:\n• <code>/admin list</code>\n• <code>/admin add &lt;chatId&gt; [群名]</code>\n• <code>/admin remove &lt;chatId&gt;</code>\n• <code>/admin leaveall [confirm]</code>\n• <code>/admin admins</code>\n• <code>/admin addadmin &lt;userId&gt; [用户名]</code>\n• <code>/admin removeadmin &lt;userId&gt;</code>',
         'HTML', replyToMessageId, messageThreadId
       );
   }

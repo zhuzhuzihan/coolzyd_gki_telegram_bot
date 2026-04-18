@@ -5,6 +5,7 @@
 
 interface Env {
   BOT_TOKEN: string;
+  KV: KVNamespace;
 }
 
 // MSG bridging: maps (chatId, messageId) -> { fromChatId, fromUserId, targetUserId, targetUsername }
@@ -67,6 +68,32 @@ interface TelegramUpdate {
       type: string;
     };
     text?: string;
+  };
+  my_chat_member?: {
+    chat: {
+      id: number;
+      type: string;
+      title?: string;
+    };
+    from: {
+      id: number;
+      first_name: string;
+      username?: string;
+    };
+    old_chat_member: {
+      user: {
+        id: number;
+        is_bot: boolean;
+      };
+      status: string;
+    };
+    new_chat_member: {
+      user: {
+        id: number;
+        is_bot: boolean;
+      };
+      status: string;
+    };
   };
 }
 
@@ -546,6 +573,226 @@ function getAvailableOKIDevices(assets: GitHubAsset[]): { devices: string[] } {
   }
 
   return { devices };
+}
+
+// ===== Whitelist Management (Workers KV) =====
+
+interface WhitelistEntry {
+  chatId: number;
+  title: string;
+  type: string;
+  addedAt: string;
+  addedBy: number;
+}
+
+// Check if a group chat is in the whitelist
+async function isGroupWhitelisted(kv: KVNamespace, chatId: number): Promise<boolean> {
+  const entry = await kv.get(`whitelist:${chatId}`);
+  return entry !== null;
+}
+
+// Add a group to the whitelist
+async function addGroupToWhitelist(kv: KVNamespace, chatId: number, title: string, type: string, addedBy: number): Promise<void> {
+  const entry: WhitelistEntry = {
+    chatId,
+    title: title || 'Unknown',
+    type,
+    addedAt: new Date().toISOString(),
+    addedBy
+  };
+  await kv.put(`whitelist:${chatId}`, JSON.stringify(entry));
+}
+
+// Remove a group from the whitelist
+async function removeGroupFromWhitelist(kv: KVNamespace, chatId: number): Promise<boolean> {
+  const existed = await kv.get(`whitelist:${chatId}`);
+  if (!existed) return false;
+  await kv.delete(`whitelist:${chatId}`);
+  return true;
+}
+
+// List all whitelisted groups
+async function listWhitelistedGroups(kv: KVNamespace): Promise<WhitelistEntry[]> {
+  const list = await kv.list({ prefix: 'whitelist:' });
+  const entries: WhitelistEntry[] = [];
+  for (const key of list.keys) {
+    const value = await kv.get(key.name);
+    if (value) {
+      try {
+        entries.push(JSON.parse(value) as WhitelistEntry);
+      } catch {
+        // Skip malformed entries
+      }
+    }
+  }
+  // Sort by chatId
+  entries.sort((a, b) => a.chatId - b.chatId);
+  return entries;
+}
+
+// Leave a Telegram chat
+async function leaveChat(botToken: string, chatId: number): Promise<boolean> {
+  try {
+    const url = `https://api.telegram.org/bot${botToken}/leaveChat`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId })
+    });
+    const result = await response.json() as { ok?: boolean };
+    return result.ok === true;
+  } catch (error) {
+    console.error('Error leaving chat:', error);
+    return false;
+  }
+}
+
+// Handle bot being added to a group — whitelist check
+async function handleBotAddedToGroup(
+  botToken: string,
+  kv: KVNamespace,
+  chatId: number,
+  chatTitle: string | undefined,
+  chatType: string
+): Promise<void> {
+  // Only process group/supergroup types
+  if (chatType !== 'group' && chatType !== 'supergroup') return;
+
+  const whitelisted = await isGroupWhitelisted(kv, chatId);
+
+  if (!whitelisted) {
+    // Send warning message before leaving
+    await sendMessage(
+      botToken,
+      chatId,
+      '⚠️ 当前群组尚未被允许使用此机器人。\n请联系机器人管理员添加白名单后再试。',
+      'HTML'
+    );
+
+    // Auto leave the group
+    const left = await leaveChat(botToken, chatId);
+    if (left) {
+      console.log(`Left non-whitelisted group: ${chatId} (${chatTitle || 'unknown'})`);
+    }
+  } else {
+    console.log(`Bot added to whitelisted group: ${chatId} (${chatTitle || 'unknown'})`);
+  }
+}
+
+// Handle /admin command — whitelist management
+async function handleAdmin(
+  botToken: string,
+  kv: KVNamespace,
+  chatId: number,
+  args: string | null,
+  fromUserId: number,
+  replyToMessageId?: number,
+  messageThreadId?: number
+): Promise<void> {
+  // Only allow fixed admins
+  const isAdmin = Object.values(MSG_USERS).includes(fromUserId);
+  if (!isAdmin) {
+    await sendMessage(
+      botToken, chatId,
+      '❌ 仅管理员可使用此命令。',
+      'HTML', replyToMessageId, messageThreadId
+    );
+    return;
+  }
+
+  if (!args) {
+    await sendMessage(
+      botToken, chatId,
+      '<b>📋 /admin 管理命令</b>\n\n' +
+      '• <code>/admin list</code> — 查看白名单群组\n' +
+      '• <code>/admin add &lt;chatId&gt; [群名]</code> — 添加群组到白名单\n' +
+      '• <code>/admin remove &lt;chatId&gt;</code> — 从白名单移除群组\n\n' +
+      '💡 Chat ID 通常为负数，例如 <code>-1001234567890</code>',
+      'HTML', replyToMessageId, messageThreadId
+    );
+    return;
+  }
+
+  const parts = args.trim().split(/\s+/);
+  const subCommand = parts[0].toLowerCase();
+
+  switch (subCommand) {
+    case 'list': {
+      const groups = await listWhitelistedGroups(kv);
+      if (groups.length === 0) {
+        await sendMessage(botToken, chatId, '📋 当前白名单为空，没有任何群组。', 'HTML', replyToMessageId, messageThreadId);
+      } else {
+        let msg = `<b>📋 白名单群组 (${groups.length})</b>\n\n`;
+        groups.forEach((g, i) => {
+          msg += `${i + 1}. <code>${g.chatId}</code> — ${g.title}\n`;
+          msg += `   类型: ${g.type} | 添加者 ID: ${g.addedBy}\n`;
+          msg += `   添加时间: ${g.addedAt}\n\n`;
+        });
+        await sendMessage(botToken, chatId, msg, 'HTML', replyToMessageId, messageThreadId);
+      }
+      break;
+    }
+    case 'add': {
+      if (parts.length < 2) {
+        await sendMessage(
+          botToken, chatId,
+          '❌ 请提供群组 Chat ID。\nUsage: <code>/admin add &lt;chatId&gt; [群名]</code>\n\n' +
+          '💡 Chat ID 通常为负数，例如 <code>-1001234567890</code>',
+          'HTML', replyToMessageId, messageThreadId
+        );
+        return;
+      }
+      const targetChatId = parseInt(parts[1], 10);
+      if (isNaN(targetChatId)) {
+        await sendMessage(botToken, chatId, '❌ 无效的 Chat ID，请输入数字。', 'HTML', replyToMessageId, messageThreadId);
+        return;
+      }
+      const title = parts.slice(2).join(' ') || 'Unknown';
+      await addGroupToWhitelist(kv, targetChatId, title, 'unknown', fromUserId);
+      await sendMessage(
+        botToken, chatId,
+        `✅ 群组已添加到白名单:\n• Chat ID: <code>${targetChatId}</code>\n• 名称: ${title}`,
+        'HTML', replyToMessageId, messageThreadId
+      );
+      break;
+    }
+    case 'remove': {
+      if (parts.length < 2) {
+        await sendMessage(
+          botToken, chatId,
+          '❌ 请提供群组 Chat ID。\nUsage: <code>/admin remove &lt;chatId&gt;</code>',
+          'HTML', replyToMessageId, messageThreadId
+        );
+        return;
+      }
+      const targetChatId = parseInt(parts[1], 10);
+      if (isNaN(targetChatId)) {
+        await sendMessage(botToken, chatId, '❌ 无效的 Chat ID，请输入数字。', 'HTML', replyToMessageId, messageThreadId);
+        return;
+      }
+      const removed = await removeGroupFromWhitelist(kv, targetChatId);
+      if (removed) {
+        await sendMessage(
+          botToken, chatId,
+          `✅ 群组 <code>${targetChatId}</code> 已从白名单移除。\n\n⚠️ 注意: 机器人不会自动退出该群组，如需退出请手动操作。`,
+          'HTML', replyToMessageId, messageThreadId
+        );
+      } else {
+        await sendMessage(
+          botToken, chatId,
+          `❌ 群组 <code>${targetChatId}</code> 不在白名单中。`,
+          'HTML', replyToMessageId, messageThreadId
+        );
+      }
+      break;
+    }
+    default:
+      await sendMessage(
+        botToken, chatId,
+        '❌ 未知子命令。可用命令:\n• <code>/admin list</code>\n• <code>/admin add &lt;chatId&gt; [群名]</code>\n• <code>/admin remove &lt;chatId&gt;</code>',
+        'HTML', replyToMessageId, messageThreadId
+      );
+  }
 }
 
 // Send document to Telegram chat
@@ -1338,6 +1585,11 @@ This bot helps you download GKI kernels with <a href="https://github.com/ReSukiS
 <b>💬 Message Bridging:</b>
 • /msg &lt;username&gt; &lt;message&gt; - Send message to another user
 
+<b>⚙️ Admin (管理员):</b>
+• /admin list - 查看白名单群组
+• /admin add &lt;chatId&gt; [群名] - 添加群组
+• /admin remove &lt;chatId&gt; - 移除群组
+
 <b>Other:</b>
 • /help - Show this help message
 
@@ -1512,6 +1764,9 @@ export default {
             case '/msg':
               await handleMsg(env.BOT_TOKEN, chatId, args || null, fromUserId, messageId, chatType, messageId, threadId);
               break;
+            case '/admin':
+              await handleAdmin(env.BOT_TOKEN, env.KV, chatId, args || null, fromUserId, messageId, threadId);
+              break;
             default:
               // Unknown command, ignore
               break;
@@ -1547,8 +1802,32 @@ export default {
             case '/oki':
               await handleDownloadOKI(env.BOT_TOKEN, chatId, args || null, messageId, threadId);
               break;
+            case '/admin':
+              // Admin commands not supported in channel posts (no from user)
+              break;
             default:
               break;
+          }
+        }
+
+        // Handle bot added to group (my_chat_member update)
+        if (update.my_chat_member) {
+          const mcm = update.my_chat_member;
+          const newStatus = mcm.new_chat_member?.status;
+          const oldStatus = mcm.old_chat_member?.status;
+
+          // Detect when bot status changes TO member/administrator (added to group)
+          if (
+            (newStatus === 'member' || newStatus === 'administrator') &&
+            (oldStatus === 'left' || oldStatus === 'banned' || oldStatus === 'restricted')
+          ) {
+            await handleBotAddedToGroup(
+              env.BOT_TOKEN,
+              env.KV,
+              mcm.chat.id,
+              mcm.chat.title,
+              mcm.chat.type
+            );
           }
         }
 
@@ -1602,7 +1881,8 @@ export default {
           { command: 'list', description: 'List available kernel versions' },
           { command: 'get_oki', description: 'Get download link for OnePlus kernel' },
           { command: 'oki', description: 'Download & send OnePlus kernel file directly' },
-          { command: 'msg', description: 'Send message to another user' }
+          { command: 'msg', description: 'Send message to another user' },
+          { command: 'admin', description: 'Admin: manage group whitelist' }
         ];
 
         const response = await fetch(telegramUrl, {

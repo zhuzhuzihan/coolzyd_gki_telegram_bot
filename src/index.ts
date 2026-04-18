@@ -58,7 +58,6 @@ interface TelegramUpdate {
         username?: string;
       };
     };
-    text?: string;
   };
   channel_post?: {
     message_id: number;
@@ -630,6 +629,31 @@ async function listWhitelistedGroups(kv: KVNamespace): Promise<WhitelistEntry[]>
   return entries;
 }
 
+// Get all group chats the bot is currently in via getUpdates
+async function getAllGroupChats(botToken: string): Promise<Array<{ id: number; title: string; type: string }>> {
+  const groups: Array<{ id: number; title: string; type: string }> = [];
+  try {
+    const url = `https://api.telegram.org/bot${botToken}/getUpdates?limit=100&allowed_updates=["my_chat_member"]`;
+    const response = await fetch(url);
+    const result = await response.json() as { ok?: boolean; result?: Array<{ my_chat_member?: { chat: { id: number; title?: string; type: string } } }> };
+    if (result.ok && result.result) {
+      const seen = new Set<number>();
+      for (const u of result.result) {
+        if (u.my_chat_member?.chat) {
+          const c = u.my_chat_member.chat;
+          if ((c.type === 'group' || c.type === 'supergroup') && !seen.has(c.id)) {
+            seen.add(c.id);
+            groups.push({ id: c.id, title: c.title || 'Unknown', type: c.type });
+          }
+        }
+      }
+    }
+  } catch (error) {
+    console.error('Error fetching group chats:', error);
+  }
+  return groups;
+}
+
 // Leave a Telegram chat
 async function leaveChat(botToken: string, chatId: number): Promise<boolean> {
   try {
@@ -706,7 +730,8 @@ async function handleAdmin(
       '<b>📋 /admin 管理命令</b>\n\n' +
       '• <code>/admin list</code> — 查看白名单群组\n' +
       '• <code>/admin add &lt;chatId&gt; [群名]</code> — 添加群组到白名单\n' +
-      '• <code>/admin remove &lt;chatId&gt;</code> — 从白名单移除群组\n\n' +
+      '• <code>/admin remove &lt;chatId&gt;</code> — 从白名单移除群组\n' +
+      '• <code>/admin leaveall confirm</code> — 一键退出所有白名单群组并清空白名单\n\n' +
       '💡 Chat ID 通常为负数，例如 <code>-1001234567890</code>',
       'HTML', replyToMessageId, messageThreadId
     );
@@ -774,7 +799,7 @@ async function handleAdmin(
       if (removed) {
         await sendMessage(
           botToken, chatId,
-          `✅ 群组 <code>${targetChatId}</code> 已从白名单移除。\n\n⚠️ 注意: 机器人不会自动退出该群组，如需退出请手动操作。`,
+          `✅ 群组 <code>${targetChatId}</code> 已从白名单移除。\n\n⚠️ 注意: 机器人不会自动退出该群组，如需退出请使用 <code>/admin leaveall</code>。`,
           'HTML', replyToMessageId, messageThreadId
         );
       } else {
@@ -786,10 +811,46 @@ async function handleAdmin(
       }
       break;
     }
+    case 'leaveall': {
+      // Require confirmation if not already confirmed
+      if (parts[1] !== 'confirm') {
+        await sendMessage(
+          botToken, chatId,
+          '⚠️ <b>一键退群确认</b>\n\n' +
+          '此操作将使机器人退出所有白名单群组并清空白名单。\n' +
+          '请输入 <code>/admin leaveall confirm</code> 确认执行。',
+          'HTML', replyToMessageId, messageThreadId
+        );
+        return;
+      }
+      const groups = await listWhitelistedGroups(kv);
+      if (groups.length === 0) {
+        await sendMessage(botToken, chatId, '📋 当前白名单为空，无需退出任何群组。', 'HTML', replyToMessageId, messageThreadId);
+        return;
+      }
+      let successCount = 0;
+      let failCount = 0;
+      const results: string[] = [];
+      for (const g of groups) {
+        const left = await leaveChat(botToken, g.chatId);
+        if (left) {
+          successCount++;
+          results.push(`✅ ${g.title} (<code>${g.chatId}</code>)`);
+          await removeGroupFromWhitelist(kv, g.chatId);
+        } else {
+          failCount++;
+          results.push(`❌ ${g.title} (<code>${g.chatId}</code>)`);
+        }
+      }
+      let report = `<b>🚪 一键退群完成</b>\n\n总计: ${groups.length} 个群组\n✅ 成功退出: ${successCount}\n❌ 退出失败: ${failCount}\n\n`;
+      report += results.join('\n');
+      await sendMessage(botToken, chatId, report, 'HTML', replyToMessageId, messageThreadId);
+      break;
+    }
     default:
       await sendMessage(
         botToken, chatId,
-        '❌ 未知子命令。可用命令:\n• <code>/admin list</code>\n• <code>/admin add &lt;chatId&gt; [群名]</code>\n• <code>/admin remove &lt;chatId&gt;</code>',
+        '❌ 未知子命令。可用命令:\n• <code>/admin list</code>\n• <code>/admin add &lt;chatId&gt; [群名]</code>\n• <code>/admin remove &lt;chatId&gt;</code>\n• <code>/admin leaveall [confirm]</code>',
         'HTML', replyToMessageId, messageThreadId
       );
   }
@@ -1589,6 +1650,7 @@ This bot helps you download GKI kernels with <a href="https://github.com/ReSukiS
 • /admin list - 查看白名单群组
 • /admin add &lt;chatId&gt; [群名] - 添加群组
 • /admin remove &lt;chatId&gt; - 移除群组
+• /admin leaveall confirm - 一键退出所有群组并清空白名单
 
 <b>Other:</b>
 • /help - Show this help message

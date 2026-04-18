@@ -724,6 +724,16 @@ async function handleAdmin(
     return;
   }
 
+  // Check KV availability
+  if (!kv) {
+    await sendMessage(
+      botToken, chatId,
+      '❌ KV 存储未配置，请联系管理员设置 Workers KV 命名空间。',
+      'HTML', replyToMessageId, messageThreadId
+    );
+    return;
+  }
+
   if (!args) {
     await sendMessage(
       botToken, chatId,
@@ -1874,22 +1884,28 @@ export default {
 
         // Handle bot added to group (my_chat_member update)
         if (update.my_chat_member) {
-          const mcm = update.my_chat_member;
-          const newStatus = mcm.new_chat_member?.status;
-          const oldStatus = mcm.old_chat_member?.status;
+          try {
+            const mcm = update.my_chat_member;
+            const newStatus = mcm.new_chat_member?.status;
+            const oldStatus = mcm.old_chat_member?.status;
 
-          // Detect when bot status changes TO member/administrator (added to group)
-          if (
-            (newStatus === 'member' || newStatus === 'administrator') &&
-            (oldStatus === 'left' || oldStatus === 'banned' || oldStatus === 'restricted')
-          ) {
-            await handleBotAddedToGroup(
-              env.BOT_TOKEN,
-              env.KV,
-              mcm.chat.id,
-              mcm.chat.title,
-              mcm.chat.type
-            );
+            // Detect when bot status changes TO member/administrator (added to group)
+            if (
+              (newStatus === 'member' || newStatus === 'administrator') &&
+              (oldStatus === 'left' || oldStatus === 'banned' || oldStatus === 'restricted')
+            ) {
+              if (env.KV) {
+                await handleBotAddedToGroup(
+                  env.BOT_TOKEN,
+                  env.KV,
+                  mcm.chat.id,
+                  mcm.chat.title,
+                  mcm.chat.type
+                );
+              }
+            }
+          } catch (error) {
+            console.error('Error handling my_chat_member:', error);
           }
         }
 
@@ -1923,7 +1939,7 @@ export default {
         const response = await fetch(telegramUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url: webhookUrl })
+          body: JSON.stringify({ url: webhookUrl, allowed_updates: ['message', 'channel_post', 'my_chat_member'] })
         });
 
         const result = await response.json();

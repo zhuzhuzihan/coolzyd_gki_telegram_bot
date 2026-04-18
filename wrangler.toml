@@ -8,5 +8,4 @@ compatibility_date = "2024-01-01"
 
 [[kv_namespaces]]
 binding = "KV"
-id = "your-kv-namespace-id"
-# Run `wrangler kv:namespace create "KV"` to get the ID, then replace above
+id = "b54208ffac2141d5a58adaxxxxxxxxxx"
